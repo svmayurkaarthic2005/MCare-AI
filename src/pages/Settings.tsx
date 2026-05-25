@@ -60,13 +60,6 @@ const Settings = () => {
     initializeSettings();
   }, []);
 
-  // Load doctor availability once userRole is determined
-  useEffect(() => {
-    if (userRole === "doctor") {
-      loadDoctorAvailability();
-    }
-  }, [userRole]);
-
   const loadUserRole = async () => {
     try {
       const { data: { user } } = await supabase.auth.getUser();
@@ -330,31 +323,24 @@ const Settings = () => {
   };
 
   const handleDeleteAccount = async () => {
-    const { data } = await supabase.auth.getSession()
+    try {
+      const { error } = await supabase.functions.invoke('delete-account', {
+        method: 'POST',
+      });
 
-    if (!data.session) {
-      alert("User not logged in")
-      return
-    }
-
-    const res = await fetch(
-      "https://wvhlrmsugmcdhsaltygg.functions.supabase.co/delete-account",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${data.session.access_token}`,
-        },
+      if (error) {
+        toast.error("Failed to delete account. Please try again.");
+        console.error("Delete account error:", error);
+        return;
       }
-    )
 
-    if (!res.ok) {
-      alert("Delete failed")
-      return
+      await supabase.auth.signOut();
+      window.location.href = "/";
+    } catch (err) {
+      console.error("Delete account error:", err);
+      toast.error("Failed to delete account. Please try again.");
     }
-
-    await supabase.auth.signOut()
-    window.location.href = "/"
-  }
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-secondary/30 to-background p-4">

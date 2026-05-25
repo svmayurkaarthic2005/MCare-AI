@@ -81,16 +81,11 @@ export const generatePrescriptionPDF = async (
   prescription: PrescriptionData,
   qrCodeUrl?: string
 ): Promise<void> => {
+  const element = document.createElement('div');
+  element.innerHTML = createPrescriptionHTML(prescription, qrCodeUrl);
+  document.body.appendChild(element);
+
   try {
-    // Create HTML content for PDF
-    const htmlContent = createPrescriptionHTML(prescription, qrCodeUrl);
-
-    // Create a temporary element to hold the HTML
-    const element = document.createElement('div');
-    element.innerHTML = htmlContent;
-    document.body.appendChild(element);
-
-    // PDF options
     const options = {
       margin: [10, 10, 20, 10],
       filename: `prescription-${prescription.patientName}-${new Date().getTime()}.pdf`,
@@ -101,14 +96,10 @@ export const generatePrescriptionPDF = async (
       logging: false,
     };
 
-    // Generate and download PDF
-    html2pdf().set(options).from(element).save();
-
-    // Cleanup
+    await html2pdf().set(options).from(element).save();
+  } finally {
+    // Always remove the element, even if pdf generation throws
     document.body.removeChild(element);
-  } catch (error) {
-    console.error('Error generating PDF:', error);
-    throw error;
   }
 };
 

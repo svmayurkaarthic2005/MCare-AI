@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import { supabase, AUTH_STORAGE_KEY } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
@@ -57,14 +57,14 @@ const Auth = () => {
         const { data: { session }, error } = await supabase.auth.getSession();
         if (error || !session) {
           // Clear any corrupted session data
-          localStorage.removeItem('sb-wvhlrmsugmcdhsaltygg-auth-token');
+          localStorage.removeItem(AUTH_STORAGE_KEY);
           console.log('Cleared invalid session');
         } else if (session) {
           navigate("/dashboard");
         }
       } catch (err) {
         console.error('Session check error:', err);
-        localStorage.removeItem('sb-wvhlrmsugmcdhsaltygg-auth-token');
+        localStorage.removeItem(AUTH_STORAGE_KEY);
       }
     };
 
@@ -77,7 +77,7 @@ const Auth = () => {
       } else if (event === 'TOKEN_REFRESHED' && !session) {
         // Token refresh failed, clear session
         console.warn('Token refresh failed, clearing session');
-        localStorage.removeItem('sb-wvhlrmsugmcdhsaltygg-auth-token');
+        localStorage.removeItem(AUTH_STORAGE_KEY);
         await supabase.auth.signOut();
       } else if (event === 'SIGNED_IN' && session) {
         console.log('User signed in');
@@ -125,7 +125,7 @@ const Auth = () => {
 
     try {
       // Clear any existing invalid session before attempting login
-      localStorage.removeItem('sb-wvhlrmsugmcdhsaltygg-auth-token');
+      localStorage.removeItem(AUTH_STORAGE_KEY);
       
       const { error } = await supabase.auth.signInWithPassword({ email, password });
 
@@ -136,7 +136,7 @@ const Auth = () => {
           toast.error("Please verify your email before signing in. Check your inbox for a verification link.");
         } else if (error.message.includes("Refresh Token")) {
           toast.error("Session error. Please clear your browser cache and try again.");
-          localStorage.removeItem('sb-wvhlrmsugmcdhsaltygg-auth-token');
+          localStorage.removeItem(AUTH_STORAGE_KEY);
         } else {
           toast.error(error.message || "Failed to sign in. Please try again.");
         }
@@ -148,7 +148,7 @@ const Auth = () => {
     } catch (error: any) {
       console.error('Sign in error:', error);
       toast.error(`Sign in failed: ${error.message}`);
-      localStorage.removeItem('sb-wvhlrmsugmcdhsaltygg-auth-token');
+      localStorage.removeItem(AUTH_STORAGE_KEY);
     } finally {
       setLoading(false);
     }
@@ -334,36 +334,24 @@ const Auth = () => {
 
       console.log("[Auth] User signed in, waiting for session to stabilize...");
 
-      // Wait longer for session to be fully established and propagated
-      // This is critical for doctor signup where we immediately check auth
-      await new Promise(resolve => setTimeout(resolve, 1500));
-
-      // Verify session is established
+      // Verify session is established with exponential backoff
       let sessionVerified = false;
-      let sessionRetries = 5;
       let verifiedUser = null;
+      const maxSessionRetries = 5;
 
-      while (sessionRetries > 0 && !sessionVerified) {
+      for (let attempt = 0; attempt < maxSessionRetries; attempt++) {
         const { data: { user: currentUser }, error: sessionError } = await supabase.auth.getUser();
         if (sessionError) {
-          console.warn(`[Auth] Session verification attempt failed (${6 - sessionRetries}/5):`, sessionError);
-          if (sessionRetries > 1) {
-            await new Promise(resolve => setTimeout(resolve, 500));
-            sessionRetries--;
-          } else {
-            sessionRetries = 0;
-          }
+          console.warn(`[Auth] Session verification attempt ${attempt + 1}/${maxSessionRetries} failed:`, sessionError);
         } else if (currentUser) {
           sessionVerified = true;
           verifiedUser = currentUser;
           console.log("[Auth] Session verified successfully for user:", currentUser.id);
-        } else {
-          if (sessionRetries > 1) {
-            await new Promise(resolve => setTimeout(resolve, 500));
-            sessionRetries--;
-          } else {
-            sessionRetries = 0;
-          }
+          break;
+        }
+        if (attempt < maxSessionRetries - 1) {
+          // Exponential backoff: 300ms, 600ms, 1200ms, 2400ms
+          await new Promise(resolve => setTimeout(resolve, 300 * Math.pow(2, attempt)));
         }
       }
 
@@ -513,9 +501,9 @@ const Auth = () => {
       console.log("[Auth] Verifying role was assigned for user:", userId);
       let roleVerify = null;
       let roleVerifyError = null;
-      let verifyRetries = 3;
+      const maxVerifyRetries = 3;
 
-      while (verifyRetries > 0 && !roleVerify) {
+      for (let attempt = 0; attempt < maxVerifyRetries; attempt++) {
         const response = await supabase
           .from('user_roles')
           .select('role')
@@ -523,22 +511,12 @@ const Auth = () => {
 
         if (response.error) {
           roleVerifyError = response.error;
-          if (verifyRetries > 1) {
-            await new Promise(resolve => setTimeout(resolve, 500));
-            verifyRetries--;
-          } else {
-            verifyRetries = 0;
-          }
         } else if (response.data && response.data.length > 0) {
           roleVerify = response.data;
-          verifyRetries = 0;
-        } else {
-          if (verifyRetries > 1) {
-            await new Promise(resolve => setTimeout(resolve, 500));
-            verifyRetries--;
-          } else {
-            verifyRetries = 0;
-          }
+          break;
+        }
+        if (attempt < maxVerifyRetries - 1) {
+          await new Promise(resolve => setTimeout(resolve, 300 * Math.pow(2, attempt)));
         }
       }
 

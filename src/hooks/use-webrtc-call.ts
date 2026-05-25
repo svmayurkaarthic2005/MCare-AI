@@ -16,8 +16,8 @@ interface WebRTCCallState {
 }
 
 interface WebRTCCallActions {
-  startCall: () => Promise<void>;
-  answerCall: () => Promise<void>;
+  startCall: (videoEnabled?: boolean) => Promise<void>;
+  answerCall: (videoEnabled?: boolean) => Promise<void>;
   endCall: () => void;
   toggleAudio: (enabled: boolean) => void;
   toggleVideo: (enabled: boolean) => void;
@@ -106,25 +106,29 @@ export const useWebRTCCall = (
   const isVideoEnabledRef = useRef<boolean>(true);
   // FIX: Prevent React StrictMode double-subscription
   const channelInitializedRef = useRef<boolean>(false);
+  // FIX: Stable ref to endCall so initializePeerConnection can call it without stale closure
+  const endCallRef = useRef<(fromRemote?: boolean) => void>(() => {});
 
   // Build ICE servers configuration with reliable TURN fallback
   const getIceServers = useCallback(async (): Promise<RTCConfiguration> => {
-    // Reliable free TURN servers (Metered.ca) as fallback
+    // Metered.ca TURN servers as fallback — credentials from env vars
+    const meteredUsername = import.meta.env.VITE_METERED_TURN_USERNAME || '4bdffd141bb6237f2674daa3';
+    const meteredCredential = import.meta.env.VITE_METERED_TURN_CREDENTIAL || 'h1EeHiZKRDlKxaGr';
     const fallbackTurnServers = [
       {
         urls: 'turns:global.relay.metered.ca:443?transport=tcp',
-        username: '4bdffd141bb6237f2674daa3',
-        credential: 'h1EeHiZKRDlKxaGr',
+        username: meteredUsername,
+        credential: meteredCredential,
       },
       {
         urls: 'turn:global.relay.metered.ca:443?transport=tcp',
-        username: '4bdffd141bb6237f2674daa3',
-        credential: 'h1EeHiZKRDlKxaGr',
+        username: meteredUsername,
+        credential: meteredCredential,
       },
       {
         urls: 'turn:global.relay.metered.ca:80?transport=udp',
-        username: '4bdffd141bb6237f2674daa3',
-        credential: 'h1EeHiZKRDlKxaGr',
+        username: meteredUsername,
+        credential: meteredCredential,
       },
     ];
 
@@ -404,7 +408,8 @@ export const useWebRTCCall = (
                 error: errorMsg,
               }));
               toast.error(errorMsg);
-              endCall();
+              // FIX: Use ref to avoid stale closure
+              endCallRef.current();
             }
             break;
           case 'closed':
@@ -423,7 +428,7 @@ export const useWebRTCCall = (
       };
 
       peerConnection.onicecandidateerror = (event: Event) => {
-        const error = event as any;
+        const error = event as RTCPeerConnectionIceErrorEvent;
         
         // FIX #2: Ignore error code 701 (normal timeout, not a real failure)
         if (error.errorCode === 701) {
@@ -502,7 +507,7 @@ export const useWebRTCCall = (
   }, []);
 
   // Start call (initiator)
-  const startCall = useCallback(async () => {
+  const startCall = useCallback(async (videoEnabled: boolean = true) => {
     try {
       setState((prev) => ({ ...prev, isCalling: true, error: null, connectionStatus: 'connecting' }));
       isInitiatorRef.current = true;
@@ -534,9 +539,15 @@ export const useWebRTCCall = (
 
       // Get media stream using ref to prevent duplicate tracks
       if (!localStreamRef.current) {
-        const stream = await getMediaStream(true);
+        const stream = await getMediaStream(videoEnabled);
         localStreamRef.current = stream;
         setState((prev) => ({ ...prev, localStream: stream }));
+
+        // Apply initial video enabled state
+        if (!videoEnabled) {
+          isVideoEnabledRef.current = false;
+          stream.getVideoTracks().forEach(t => { t.enabled = false; });
+        }
 
         // Add tracks to peer connection
         stream.getTracks().forEach((track) => {
@@ -557,14 +568,11 @@ export const useWebRTCCall = (
         throw new Error('Signaling channel disconnected. Please try again.');
       }
       lastOfferRef.current = peerConnection.localDescription;
-      if (!signalChannelRef.current) {
-        throw new Error('Signaling channel disconnected. Cannot send offer.');
-      }
       signalChannelRef.current.send({
         type: 'broadcast',
         event: 'offer',
         payload: {
-          sdp: peerConnection.localDescription?.sdp,
+          sdp: peerConnection.localDescription!.sdp,
           type: 'offer',
           callerName: userRole === 'doctor' ? 'Doctor' : 'Patient',
           callerRole: userRole,
@@ -602,7 +610,7 @@ export const useWebRTCCall = (
 
   // Answer call (receiver)
   // FIX 2: Ensure tracks are added BEFORE creating answer (mandatory for proper transceiver config)
-  const answerCall = useCallback(async () => {
+  const answerCall = useCallback(async (videoEnabled: boolean = true) => {
     try {
       setState((prev) => ({ ...prev, isAnswering: true, error: null, connectionStatus: 'connecting' }));
       isInitiatorRef.current = false;
@@ -616,9 +624,15 @@ export const useWebRTCCall = (
       // This ensures transceivers are properly configured
       if (!localStreamRef.current) {
         console.log('[WebRTC] Getting media for answer...');
-        const stream = await getMediaStream(true);
+        const stream = await getMediaStream(videoEnabled);
         localStreamRef.current = stream;
         setState((prev) => ({ ...prev, localStream: stream }));
+
+        // Apply initial video enabled state
+        if (!videoEnabled) {
+          isVideoEnabledRef.current = false;
+          stream.getVideoTracks().forEach(t => { t.enabled = false; });
+        }
         
         stream.getTracks().forEach((track) => {
           console.log('[WebRTC] Adding track before answer:', track.kind);
@@ -642,7 +656,7 @@ export const useWebRTCCall = (
         type: 'broadcast',
         event: 'answer',
         payload: {
-          sdp: peerConnection.localDescription?.sdp,
+          sdp: peerConnection.localDescription!.sdp,
           type: 'answer',
           senderId: userId,
         },
@@ -664,6 +678,7 @@ export const useWebRTCCall = (
   }, [getMediaStream, userId]);
 
   // End call
+  // FIX: Use localStreamRef instead of state.localStream to avoid stale closure
   const endCall = useCallback((fromRemote: boolean = false) => {
     if (isEndingCallRef.current) return;
     isEndingCallRef.current = true;
@@ -676,12 +691,13 @@ export const useWebRTCCall = (
       statsIntervalRef.current = null;
     }
 
-    // Stop all tracks
-    if (state.localStream) {
-      state.localStream.getTracks().forEach((track) => {
+    // FIX: Use ref instead of state to avoid stale closure capturing old stream
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((track) => {
         track.stop();
         console.log('[WebRTC] Stopped track:', track.kind);
       });
+      localStreamRef.current = null;
     }
 
     // Close peer connection
@@ -692,15 +708,11 @@ export const useWebRTCCall = (
 
     // Send end signal if local
     if (!fromRemote && signalChannelRef.current) {
-      if (!signalChannelRef.current) {
-        console.warn('[WebRTC] Signaling channel not ready for call-end');
-      } else {
-        signalChannelRef.current.send({
-          type: 'broadcast',
-          event: 'call-end',
-          payload: { senderId: userId },
-        });
-      }
+      signalChannelRef.current.send({
+        type: 'broadcast',
+        event: 'call-end',
+        payload: { senderId: userId },
+      });
     }
 
     // Clear timeout
@@ -724,16 +736,35 @@ export const useWebRTCCall = (
 
     isInitiatorRef.current = false;
     reconnectAttemptRef.current = 0;
-    // FIX: Clear localStreamRef to ensure next call gets fresh media
-    localStreamRef.current = null;
     // FIX: Reset camera state to front-facing for next call
     currentFacingModeRef.current = 'user';
+    // Reset mute state refs so next call starts unmuted
+    isAudioEnabledRef.current = true;
+    isVideoEnabledRef.current = true;
+    // Clear any buffered ICE candidates from the previous session
+    pendingIceCandidatesRef.current = [];
+    // Clear ICE restart guard so next call can restart ICE immediately if needed
+    iceRestartInProgressRef.current = false;
     toast.success('Call ended');
 
     setTimeout(() => {
       isEndingCallRef.current = false;
     }, 500);
-  }, [state.localStream, userId]);
+  }, [userId]);
+
+  // FIX: Keep endCallRef in sync so initializePeerConnection and signaling handlers
+  // always call the latest version without stale closures
+  endCallRef.current = endCall;
+
+  // FIX: Clean up stats interval on component unmount (endCall may not be called)
+  useEffect(() => {
+    return () => {
+      if (statsIntervalRef.current) {
+        clearInterval(statsIntervalRef.current);
+        statsIntervalRef.current = null;
+      }
+    };
+  }, []);
 
   // Toggle audio
   // FIX 1: Use RTCRtpSender instead of MediaStream track
@@ -775,15 +806,16 @@ export const useWebRTCCall = (
 
   // Switch camera (mobile)
   // FIX 4: Preserve mute state after replaceTrack
+  // FIX: Use localStreamRef instead of state.localStream to avoid stale closure
   const switchCamera = useCallback(async () => {
-    if (!state.localStream) return;
+    if (!localStreamRef.current) return;
 
     try {
       const newFacingMode = currentFacingModeRef.current === 'user' ? 'environment' : 'user';
       currentFacingModeRef.current = newFacingMode;
 
       // Stop current video track
-      state.localStream.getVideoTracks().forEach((track) => track.stop());
+      localStreamRef.current.getVideoTracks().forEach((track) => track.stop());
 
       // Get new stream with different camera
       const newStream = await navigator.mediaDevices.getUserMedia({
@@ -809,19 +841,20 @@ export const useWebRTCCall = (
         }
       }
 
-      // Update local stream
-      const currentAudioTrack = state.localStream.getAudioTracks()[0];
+      // Update local stream using ref for current audio track
+      const currentAudioTrack = localStreamRef.current.getAudioTracks()[0];
       const updatedStream = new MediaStream();
       if (currentAudioTrack) updatedStream.addTrack(currentAudioTrack);
       updatedStream.addTrack(newVideoTrack);
 
+      localStreamRef.current = updatedStream;
       setState((prev) => ({ ...prev, localStream: updatedStream }));
       toast.success(`Switched to ${newFacingMode === 'user' ? 'front' : 'back'} camera`);
     } catch (error) {
       console.error('[WebRTC] Error switching camera:', error);
       toast.error('Could not switch camera');
     }
-  }, [state.localStream]);
+  }, []);
 
   // Dismiss incoming call
   const dismissIncomingCall = useCallback(() => {
@@ -835,6 +868,9 @@ export const useWebRTCCall = (
 
   // Setup signaling channel
   useEffect(() => {
+    // Don't set up a channel if appointmentId is empty (e.g. offline consultation)
+    if (!appointmentId) return;
+
     // FIX: Prevent React StrictMode double-subscription
     // In dev mode, useEffect runs twice; this guard prevents channel cleanup mid-call
     if (channelInitializedRef.current) {
@@ -901,7 +937,8 @@ export const useWebRTCCall = (
         // This ensures audio/video tracks are properly sent to the caller
         try {
           if (!localStreamRef.current) {
-            const stream = await getMediaStream(true);
+            // Respect the user's camera preference (set via cameraOffMode before call)
+            const stream = await getMediaStream(isVideoEnabledRef.current);
             localStreamRef.current = stream;
             setState((prev) => ({ ...prev, localStream: stream }));
             
@@ -1090,7 +1127,8 @@ export const useWebRTCCall = (
     const handleCallEnd = (payload: any) => {
       if (payload.payload?.senderId === userId) return;
       console.log('[WebRTC] Remote ended call');
-      endCall(true);
+      // FIX: Use ref to always call the latest endCall (avoids stale closure)
+      endCallRef.current(true);
     };
 
     channel

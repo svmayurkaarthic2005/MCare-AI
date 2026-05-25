@@ -79,10 +79,16 @@ export const PatientQRCode = ({ patient }: { patient: PatientData }) => {
       const downloadLink = document.createElement("a");
       downloadLink.download = `${patient.full_name}-qr-code.png`;
       downloadLink.href = pngFile;
-      downloadLink.click();
+      try {
+        document.body.appendChild(downloadLink);
+        downloadLink.click();
+      } finally {
+        document.body.removeChild(downloadLink);
+      }
     };
 
-    img.src = "data:image/svg+xml;base64," + btoa(svgData);
+    // Use encodeURIComponent instead of btoa to handle non-ASCII characters
+    img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgData)}`;
   };
 
   return (

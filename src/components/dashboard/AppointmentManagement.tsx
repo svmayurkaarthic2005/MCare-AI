@@ -49,6 +49,8 @@ export const AppointmentManagement = ({ doctorId }: { doctorId: string }) => {
   const [videoChatOpen, setVideoChatOpen] = useState(false);
   const [selectedAppointmentForVideo, setSelectedAppointmentForVideo] = useState<Appointment | null>(null);
   const appointmentsRef = useRef<HTMLDivElement>(null);
+  // Ref so event listeners always call the latest fetchAppointments without stale closure
+  const fetchAppointmentsRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     if (doctorId) {
@@ -66,8 +68,7 @@ export const AppointmentManagement = ({ doctorId }: { doctorId: string }) => {
             filter: `doctor_id=eq.${doctorId}`
           },
           () => {
-            console.log('[AppointmentManagement] New emergency booking received - refreshing data');
-            fetchAppointments();
+            fetchAppointmentsRef.current();
           }
         )
         .subscribe();
@@ -97,7 +98,7 @@ export const AppointmentManagement = ({ doctorId }: { doctorId: string }) => {
           }, 2000);
         }
         // Refresh emergency bookings data
-        fetchAppointments();
+        fetchAppointmentsRef.current();
       }
     };
 
@@ -257,6 +258,9 @@ export const AppointmentManagement = ({ doctorId }: { doctorId: string }) => {
       setLoading(false);
     }
   };
+
+  // Keep ref in sync so event listeners and realtime callbacks always use the latest version
+  fetchAppointmentsRef.current = fetchAppointments;
 
   const updateAppointmentStatus = async (appointmentId: string, status: string, appointment?: Appointment) => {
     try {

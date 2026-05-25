@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Activity, Users, Calendar, FileText, Search, Menu, X } from "lucide-react";
-import { supabase } from "@/integrations/supabase/client";
+import { supabase, AUTH_STORAGE_KEY } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import type { User } from "@supabase/supabase-js";
 import { useN8nChat } from "@/hooks/use-n8n-chat";
@@ -54,7 +54,8 @@ interface DoctorDashboardProps {
 const DoctorDashboard = ({ showChat = false }: DoctorDashboardProps) => {
   const navigate = useNavigate();
   
-  // Initialize n8n chat - unconditional hook call (required by React)
+  // Always call hook unconditionally (Rules of Hooks)
+  // The hook itself checks auth state and hides the widget when not needed
   useN8nChat();
   
   const [user, setUser] = useState<User | null>(null);
@@ -80,6 +81,7 @@ const DoctorDashboard = ({ showChat = false }: DoctorDashboardProps) => {
   // Realtime subscriptions for automatic updates
   useEffect(() => {
     if (!user?.id) return;
+    const uid = user.id;
 
     // Subscribe to appointments changes
     const appointmentsChannel = supabase
@@ -90,10 +92,10 @@ const DoctorDashboard = ({ showChat = false }: DoctorDashboardProps) => {
           event: '*',
           schema: 'public',
           table: 'appointments',
-          filter: `doctor_id=eq.${user.id}`
+          filter: `doctor_id=eq.${uid}`
         },
         () => {
-          loadDoctorStats(user.id);
+          loadDoctorStats(uid);
         }
       )
       .subscribe();
@@ -107,10 +109,10 @@ const DoctorDashboard = ({ showChat = false }: DoctorDashboardProps) => {
           event: '*',
           schema: 'public',
           table: 'doctor_patients',
-          filter: `doctor_id=eq.${user.id}`
+          filter: `doctor_id=eq.${uid}`
         },
         () => {
-          fetchPatients(user.id);
+          fetchPatients(uid);
         }
       )
       .subscribe();
@@ -119,6 +121,7 @@ const DoctorDashboard = ({ showChat = false }: DoctorDashboardProps) => {
       supabase.removeChannel(appointmentsChannel);
       supabase.removeChannel(patientsChannel);
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id]);
 
   const checkAuth = async () => {
@@ -135,8 +138,8 @@ const DoctorDashboard = ({ showChat = false }: DoctorDashboardProps) => {
       }
 
       // Now get the user with retries
-      let user = null;
-      let authError = null;
+      let user: Awaited<ReturnType<typeof supabase.auth.getUser>>['data']['user'] = null;
+      let authError: Error | null = null;
       let getRetries = 3;
 
       while (getRetries > 0 && !user) {
@@ -169,7 +172,7 @@ const DoctorDashboard = ({ showChat = false }: DoctorDashboardProps) => {
       if (authError || !user) {
         console.error("[DoctorDashboard] Auth error or no user found:", authError);
         // Clear invalid session
-        localStorage.removeItem('sb-wvhlrmsugmcdhsaltygg-auth-token');
+        localStorage.removeItem(AUTH_STORAGE_KEY);
         await supabase.auth.signOut();
         navigate("/auth");
         return;
@@ -183,7 +186,7 @@ const DoctorDashboard = ({ showChat = false }: DoctorDashboardProps) => {
         .select("id, role")
         .eq("user_id", user.id);
 
-      let roleData = null;
+      let roleData: { id: string; role: string } | null = null;
       
       if (roleError) {
         console.error("[DoctorDashboard] Role lookup error:", roleError);
@@ -198,17 +201,16 @@ const DoctorDashboard = ({ showChat = false }: DoctorDashboardProps) => {
         }
         console.log("[DoctorDashboard] Doctor role recovered successfully");
       } else if (roleDataArray && roleDataArray.length > 1) {
-        // Handle duplicate roles - keep first one, delete others
+        // Handle duplicate roles - keep first one, delete others in a single query
         console.warn("[DoctorDashboard] Found multiple role entries, cleaning up...");
         roleData = roleDataArray[0];
-        const idsToDelete = roleDataArray.slice(1).map(r => r.id);
-        for (const id of idsToDelete) {
-          const { error: deleteError } = await supabase.from("user_roles").delete().eq("id", id);
-          if (deleteError) {
-            console.error("[DoctorDashboard] Error deleting duplicate role:", deleteError);
-          }
+        const idsToDelete = roleDataArray.slice(1).map((r: any) => r.id);
+        const { error: deleteError } = await supabase.from("user_roles").delete().in("id", idsToDelete);
+        if (deleteError) {
+          console.error("[DoctorDashboard] Error deleting duplicate roles:", deleteError);
+        } else {
+          console.log("[DoctorDashboard] Cleaned up duplicate roles");
         }
-        console.log("[DoctorDashboard] Cleaned up duplicate roles");
       } else if (roleDataArray && roleDataArray.length === 1) {
         roleData = roleDataArray[0];
       }
@@ -296,7 +298,7 @@ const DoctorDashboard = ({ showChat = false }: DoctorDashboardProps) => {
       // Clear session on any auth error
       if (error instanceof Error && error.message?.includes('Refresh Token')) {
         console.warn('[DoctorDashboard] Refresh token error, clearing session');
-        localStorage.removeItem('sb-wvhlrmsugmcdhsaltygg-auth-token');
+        localStorage.removeItem(AUTH_STORAGE_KEY);
         await supabase.auth.signOut();
       }
       toast.error("Authentication error. Please sign in again.");

@@ -72,11 +72,11 @@ const Landing = () => {
 
   useEffect(() => {
     const interval = setInterval(() => {
-      nextSlide();
+      setCurrentSlide((prev) => (prev + 1) % slides.length);
     }, 4000);
 
     return () => clearInterval(interval);
-  }, [currentSlide]);
+  }, [slides.length]);
 
   useEffect(() => {
     const observedCards = new Set<string>();

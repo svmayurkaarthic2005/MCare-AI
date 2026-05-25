@@ -31,14 +31,14 @@ export const PatientEmergencyBookings = ({ patientId }: PatientEmergencyBookings
   useEffect(() => {
     if (patientId) {
       fetchEmergencyBookings();
-      subscribeToChanges();
+      const cleanup = subscribeToChanges();
+      return cleanup;
     }
   }, [patientId]);
 
   const fetchEmergencyBookings = async () => {
     try {
       setLoading(true);
-      // @ts-ignore - emergency_bookings table added via migration
       const { data: bookingsData, error: bookingsError } = await (supabase as any)
         .from("emergency_bookings")
         .select("id, doctor_id, status, urgency_level, reason, requested_at, responded_at, doctor_notes")
@@ -102,7 +102,6 @@ export const PatientEmergencyBookings = ({ patientId }: PatientEmergencyBookings
   };
 
   const subscribeToChanges = () => {
-    // @ts-ignore - emergency_bookings table added via migration
     const channel = supabase
       .channel("patient-emergency-bookings")
       .on(

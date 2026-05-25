@@ -101,6 +101,8 @@ const CHAT_CSS = `
 
 export const useN8nChat = () => {
   useEffect(() => {
+    let observer: MutationObserver | null = null;
+
     const initializeChat = async () => {
       try {
         // Check if user is authenticated before initializing chat
@@ -117,8 +119,9 @@ export const useN8nChat = () => {
         // @ts-ignore - External CDN module
         const { createChat } = await import('https://cdn.jsdelivr.net/npm/@n8n/chat/dist/chat.bundle.es.js');
         
-        // Use n8n webhook for chat
-        const webhookUrl = 'https://shaven-luz-superideally.ngrok-free.dev/webhook/91e16669-c4a9-4c40-b5da-2e0bf5d76a97/chat';
+        // Use n8n webhook for chat - read from env variable, fall back to hardcoded for dev
+        const webhookUrl = import.meta.env.VITE_N8N_WEBHOOK_URL ||
+          'https://shaven-luz-superideally.ngrok-free.dev/webhook/91e16669-c4a9-4c40-b5da-2e0bf5d76a97/chat';
         
         // Initialize n8n chat with Mayur as agent name and theme colors
         window.n8nChatInstance = createChat({
@@ -138,7 +141,7 @@ export const useN8nChat = () => {
           }
         });
         
-        console.log(`✅ n8n chat widget initialized with Mayur as agent (${import.meta.env.DEV ? 'local' : 'remote'})`);
+        console.log(`✅ n8n chat widget initialized with Mayur as agent`);
         
         // Inject CSS into iframe after chat loads
         const injectCSS = () => {
@@ -167,21 +170,19 @@ export const useN8nChat = () => {
         setTimeout(injectCSS, 2000);
         setTimeout(injectCSS, 3000);
         
-        // Watch for iframe changes
-        const observer = new MutationObserver(() => {
+        // Watch for iframe changes — store ref so cleanup can disconnect it
+        observer = new MutationObserver(() => {
           injectCSS();
         });
         
         observer.observe(document.body, { childList: true, subtree: true });
-        
-        return () => observer.disconnect();
       } catch (error) {
         console.error('❌ Error initializing n8n chat:', error);
       }
     };
 
     // Listen for auth state changes to control chat visibility
-    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
+    const { data: authListener } = supabase.auth.onAuthStateChange((event: string, session: any) => {
       if (event === 'SIGNED_OUT' || !session) {
         hideChat();
       } else if (event === 'SIGNED_IN' || event === 'USER_UPDATED') {
@@ -193,6 +194,11 @@ export const useN8nChat = () => {
     initializeChat();
 
     return () => {
+      // Disconnect observer to prevent memory leak
+      if (observer) {
+        observer.disconnect();
+        observer = null;
+      }
       if (authListener?.subscription) {
         authListener.subscription.unsubscribe();
       }

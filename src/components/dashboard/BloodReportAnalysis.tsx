@@ -87,56 +87,51 @@ export const BloodReportAnalysis = ({ userId }: { userId: string }) => {
     setAnalysisResponse(null);
 
     try {
-      // Convert file to base64
-      const reader = new FileReader();
-      reader.onload = async () => {
-        try {
-          const base64Data = reader.result as string;
+      // Convert file to base64 using a Promise wrapper
+      const base64Data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = () => reject(new Error("Failed to read file"));
+        reader.readAsDataURL(selectedFile);
+      });
 
-          // Send to webhook
-          const response = await fetch(
-            "https://shaven-luz-superideally.ngrok-free.dev/webhook-test/62e1f220-0827-4dbc-84cf-23c8ea9d3cf3",
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                userId: userId,
-                image: base64Data,
-                fileName: selectedFile.name,
-                fileSize: selectedFile.size,
-                timestamp: new Date().toISOString(),
-              }),
-            }
-          );
-
-          if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-          }
-
-          const data = await response.json();
-          const parsedData = parseAnalysisResponse(data);
-          setAnalysisResponse(parsedData);
-          setShowResponse(true);
-          toast.success("Blood report analysis submitted successfully");
-          
-          // Reset form
-          setSelectedFile(null);
-          setPreview(null);
-        } catch (err) {
-          const errorMessage = err instanceof Error ? err.message : "Unknown error occurred";
-          setError(`Failed to submit analysis: ${errorMessage}`);
-          toast.error("Failed to submit blood report");
-          console.error("Submission error:", err);
-        } finally {
-          setUploading(false);
+      const webhookUrl = import.meta.env.VITE_BLOOD_ANALYSIS_WEBHOOK_URL ||
+        'https://shaven-luz-superideally.ngrok-free.dev/webhook-test/62e1f220-0827-4dbc-84cf-23c8ea9d3cf3';
+      const response = await fetch(webhookUrl,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            userId: userId,
+            image: base64Data,
+            fileName: selectedFile.name,
+            fileSize: selectedFile.size,
+            timestamp: new Date().toISOString(),
+          }),
         }
-      };
-      reader.readAsDataURL(selectedFile);
+      );
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const parsedData = parseAnalysisResponse(data);
+      setAnalysisResponse(parsedData);
+      setShowResponse(true);
+      toast.success("Blood report analysis submitted successfully");
+
+      // Reset form
+      setSelectedFile(null);
+      setPreview(null);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : "Unknown error occurred";
-      setError(`Error processing file: ${errorMessage}`);
+      setError(`Failed to submit analysis: ${errorMessage}`);
+      toast.error("Failed to submit blood report");
+      console.error("Submission error:", err);
+    } finally {
       setUploading(false);
     }
   };

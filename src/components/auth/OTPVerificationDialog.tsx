@@ -89,6 +89,7 @@ export const OTPVerificationDialog = ({
 
       // OTP verified successfully
       setSuccess(true);
+      setLoading(false);
       toast.success("Email verified successfully!");
       
       // Call success callback after a brief delay

@@ -91,7 +91,7 @@ export const EmergencyBookingDialog = ({
       }
 
       // Combine data
-      const profileMap = new Map(profileData?.map((p: any) => [p.id, p.full_name]) || []);
+      const profileMap = new Map<string, string>(profileData?.map((p: any) => [p.id, p.full_name as string]) || []);
       
       const formattedDoctors = doctorData?.map((doc: any) => {
         const fullName = profileMap.get(doc.user_id) || "[Name not available]";
@@ -126,6 +126,13 @@ export const EmergencyBookingDialog = ({
 
     if (!contactNumber.trim()) {
       toast.error("Please provide a contact number");
+      return;
+    }
+
+    // Validate phone number format: digits, spaces, +, -, (, ) only; min 7 digits
+    const phoneDigits = contactNumber.replace(/\D/g, "");
+    if (phoneDigits.length < 7 || phoneDigits.length > 15) {
+      toast.error("Please enter a valid contact number (7–15 digits)");
       return;
     }
 

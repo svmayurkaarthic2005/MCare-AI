@@ -1,7 +1,18 @@
-project_id = "gfglzrbfolbqxtuytcru"
+project_id = "wvhlrmsugmcdhsaltygg"
 
+# health-chat: requires a valid user JWT (auth check is also done in the function)
 [functions.health-chat]
 verify_jwt = true
 
+# turn: requires a valid user JWT to prevent TURN credential theft
+# Auth is also validated inside the function as a defence-in-depth measure
 [functions.turn]
+verify_jwt = true
+
+# create-notification: called server-side with service role key, no user JWT needed
+[functions.create-notification]
+verify_jwt = false
+
+# delete-account: validates the user JWT inside the function itself
+[functions.delete-account]
 verify_jwt = false

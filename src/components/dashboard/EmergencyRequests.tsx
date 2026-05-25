@@ -44,7 +44,8 @@ export const EmergencyRequests = ({ doctorId }: EmergencyRequestsProps) => {
   useEffect(() => {
     if (doctorId) {
       fetchEmergencyRequests();
-      subscribeToChanges();
+      const cleanup = subscribeToChanges();
+      return cleanup;
     }
   }, [doctorId]);
 

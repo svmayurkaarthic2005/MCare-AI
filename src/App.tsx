@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Shield } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import ScrollToTop from "@/components/ScrollToTop";
-import { supabase } from "@/integrations/supabase/client";
+import { supabase, AUTH_STORAGE_KEY } from "@/integrations/supabase/client";
 import { FloatingAIAssistant } from "@/components/dashboard/FloatingAIAssistant";
 import mayurPhoto from "@/assets/mayur-photo.jpg";
 import Landing from "./pages/Landing";
@@ -132,7 +132,7 @@ const AppContent = () => {
             // Handle refresh token errors by clearing session
             if (sessionError.message?.includes('Refresh Token') || sessionError.message?.includes('Invalid')) {
               console.warn('Clearing invalid session due to refresh token error');
-              localStorage.removeItem('sb-wvhlrmsugmcdhsaltygg-auth-token');
+              localStorage.removeItem(AUTH_STORAGE_KEY);
               try {
                 await supabase.auth.signOut();
               } catch (e) {
@@ -162,7 +162,7 @@ const AppContent = () => {
               // Handle refresh token errors
               if (error.message?.includes('Refresh Token')) {
                 console.warn('Clearing session due to refresh token error');
-                localStorage.removeItem('sb-wvhlrmsugmcdhsaltygg-auth-token');
+                localStorage.removeItem(AUTH_STORAGE_KEY);
               }
               // Clear invalid session
               try {

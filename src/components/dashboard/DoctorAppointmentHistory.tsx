@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -82,6 +82,11 @@ export const DoctorAppointmentHistory = ({
   const [videoChatOpen, setVideoChatOpen] = useState(false);
   const [selectedAppointmentForVideo, setSelectedAppointmentForVideo] = useState<Appointment | null>(null);
 
+  // Refs so realtime callbacks always call the latest fetch functions
+  const fetchAppointmentHistoryRef = useRef<() => void>(() => {});
+  const fetchFeedbacksRef = useRef<() => void>(() => {});
+  const fetchPrescriptionsRef = useRef<() => void>(() => {});
+
   useEffect(() => {
     if (doctorId) {
       fetchAppointmentHistory();
@@ -106,7 +111,7 @@ export const DoctorAppointmentHistory = ({
             filter: `doctor_id=eq.${doctorId}`
           },
           () => {
-            fetchAppointmentHistory();
+            fetchAppointmentHistoryRef.current();
           }
         )
         .subscribe((status) => {
@@ -126,7 +131,7 @@ export const DoctorAppointmentHistory = ({
             filter: `doctor_id=eq.${doctorId}`
           },
           () => {
-            fetchFeedbacks();
+            fetchFeedbacksRef.current();
           }
         )
         .subscribe((status) => {
@@ -146,7 +151,7 @@ export const DoctorAppointmentHistory = ({
             filter: `doctor_id=eq.${doctorId}`
           },
           () => {
-            fetchAppointmentHistory();
+            fetchAppointmentHistoryRef.current();
           }
         )
         .subscribe((status) => {
@@ -318,6 +323,11 @@ export const DoctorAppointmentHistory = ({
     }
   };
 
+  // Keep refs in sync so realtime callbacks always use the latest versions
+  fetchAppointmentHistoryRef.current = fetchAppointmentHistory;
+  fetchFeedbacksRef.current = fetchFeedbacks;
+  fetchPrescriptionsRef.current = fetchPrescriptions;
+
   const canProvideFeedback = (appointment: Appointment) => {
     const appointmentDate = new Date(appointment.appointment_date);
     const now = new Date();
@@ -483,22 +493,6 @@ export const DoctorAppointmentHistory = ({
 
                     {canProvideFeedback(appointment) && (
                       <div className="pt-1 sm:pt-1.5 border-t border-primary/10 space-y-1 sm:space-y-1.5">
-                        <div className="flex gap-2 flex-wrap">
-                          {appointment.status === "approved" && (!appointment.consultation_type || appointment.consultation_type === 'online') && (
-                            <Button
-                              size="sm"
-                              onClick={() => {
-                                setSelectedAppointmentForVideo(appointment);
-                                setVideoChatOpen(true);
-                              }}
-                              className="bg-blue-600 hover:bg-blue-700 text-white gap-1 h-8 text-xs font-medium"
-                            >
-                              <Video className="h-3 w-3" />
-                              Start Call
-                            </Button>
-                          )}
-                        </div>
-
                         {feedbacks[appointment.id]?.doctor_feedback ? (
                           <div className="space-y-1 sm:space-y-2">
                             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-0.5 sm:gap-1">

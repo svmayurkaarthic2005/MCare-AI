@@ -208,10 +208,13 @@ export function PatientDetailsDialog({
       const a = document.createElement("a");
       a.href = url;
       a.download = fileName;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      try {
+        document.body.appendChild(a);
+        a.click();
+      } finally {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
     } catch (error) {
       console.error("Error downloading file:", error);
       toast.error("Failed to download file");

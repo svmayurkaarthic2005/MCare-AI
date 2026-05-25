@@ -41,15 +41,17 @@ export async function recoverUserRole(userId: string): Promise<RoleRecoveryResul
       // If multiple roles exist, clean up duplicates
       if (existingRoles.length > 1) {
         console.warn('[RoleRecovery] Found multiple role entries for user, cleaning up...');
-        // Keep the first one and delete the rest
+        // Keep the first one and delete the rest in a single query
         const idsToDelete = (existingRoles as any[]).slice(1).map((r: any) => r.id);
-        for (const id of idsToDelete) {
-          const { error: deleteError } = await (supabase as any).from('user_roles').delete().eq('id', id);
-          if (deleteError) {
-            console.error('[RoleRecovery] Error deleting duplicate:', deleteError);
-          }
+        const { error: deleteError } = await (supabase as any)
+          .from('user_roles')
+          .delete()
+          .in('id', idsToDelete);
+        if (deleteError) {
+          console.error('[RoleRecovery] Error deleting duplicate roles:', deleteError);
+        } else {
+          console.log('[RoleRecovery] Cleaned up', idsToDelete.length, 'duplicate role entries');
         }
-        console.log('[RoleRecovery] Cleaned up', idsToDelete.length, 'duplicate role entries');
       }
       
       const role = (existingRoles as any[])[0].role;

@@ -101,15 +101,18 @@ export const RecordsUpload = ({ userId }: { userId: string }) => {
       return;
     }
 
-    // Create download link
+    // Create download link and clean up reliably
     const url = URL.createObjectURL(data);
     const a = document.createElement("a");
     a.href = url;
     a.download = fileName;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    try {
+      document.body.appendChild(a);
+      a.click();
+    } finally {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
   };
 
   const handleDelete = async (fileName: string) => {

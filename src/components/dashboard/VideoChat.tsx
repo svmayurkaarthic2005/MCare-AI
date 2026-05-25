@@ -11,8 +11,8 @@ interface VideoChatProps {
   isCallActive: boolean;
   isCalling: boolean;
   isAnswering: boolean;
-  onStartCall: () => Promise<void>;
-  onAnswerCall: () => Promise<void>;
+  onStartCall: (videoEnabled?: boolean) => Promise<void>;
+  onAnswerCall: (videoEnabled?: boolean) => Promise<void>;
   onEndCall: () => void;
   onToggleAudio: (enabled: boolean) => void;
   onToggleVideo: (enabled: boolean) => void;
@@ -70,11 +70,26 @@ export const VideoChat = ({
     checkMultipleCameras().then(setHasMultipleCameras);
   }, []);
 
+  // Reset media control state when call ends so next call starts fresh
+  useEffect(() => {
+    if (!isCallActive && !isCalling && !isAnswering) {
+      setAudioEnabled(true);
+      setVideoEnabled(true);
+      setCameraOffMode(false);
+      setIsFullscreen(false);
+      setExpandRemote(false);
+    }
+  }, [isCallActive, isCalling, isAnswering]);
+
   // Connect local stream to video element
   useEffect(() => {
-    if (localVideoRef.current && localStream) {
+    if (!localVideoRef.current) return;
+    if (localStream) {
       localVideoRef.current.srcObject = localStream;
       localVideoRef.current.play().catch(() => {});
+    } else {
+      // Clear the video element when stream is gone
+      localVideoRef.current.srcObject = null;
     }
   }, [localStream]);
 
@@ -83,7 +98,13 @@ export const VideoChat = ({
   // Mobile browsers ignore dynamic stream updates unless you force attach
   // FIX (DESKTOP CHROME): Must explicitly call .play() - autoplay doesn't work without user gesture
   useEffect(() => {
-    if (!remoteVideoRef.current || !remoteStream) return;
+    if (!remoteVideoRef.current) return;
+
+    if (!remoteStream) {
+      // Clear the video element when stream is gone (prevents showing last frame)
+      remoteVideoRef.current.srcObject = null;
+      return;
+    }
 
     console.log('[UI] Remote stream changed, tracks:', 
       remoteStream.getTracks().map(t => ({ kind: t.kind, enabled: t.enabled, readyState: t.readyState }))
@@ -97,17 +118,17 @@ export const VideoChat = ({
       if (!remoteVideoRef.current) return;
       
       try {
-        console.log('[UI] Attempting to play remote video...');
         await remoteVideoRef.current.play();
-        console.log('[UI] Remote video playing successfully');
-      } catch (err: any) {
-        console.warn('[UI] Play failed:', err.name, err.message);
+      } catch (err: unknown) {
+        const e = err as { name?: string; message?: string };
+        console.warn('[UI] Play failed:', e.name, e.message);
         // Retry after 300ms (accounts for transceiver setup delay)
         setTimeout(() => {
           if (remoteVideoRef.current) {
-            remoteVideoRef.current.play().catch(e => 
-              console.warn('[UI] Retry play failed:', e.name)
-            );
+            remoteVideoRef.current.play().catch((retryErr: unknown) => {
+              const re = retryErr as { name?: string };
+              console.warn('[UI] Retry play failed:', re.name);
+            });
           }
         }, 300);
       }
@@ -119,14 +140,10 @@ export const VideoChat = ({
   // Defensive fix: Force play when connection becomes connected
   useEffect(() => {
     if (connectionStatus === 'connected') {
-      console.log('[UI] Connection established, forcing video play');
-      setTimeout(() => {
-        document.querySelectorAll('video').forEach(v => {
-          v.play().catch(() => {
-            console.log('[UI] Video play retry on connected');
-          });
-        });
-      }, 500);
+      // Only play our own video elements, not every video on the page
+      [localVideoRef.current, remoteVideoRef.current].forEach(v => {
+        if (v) v.play().catch(() => {});
+      });
     }
   }, [connectionStatus]);
 
@@ -142,11 +159,16 @@ export const VideoChat = ({
     onToggleVideo(newState);
   };
 
-  const handleCopyAppointmentId = () => {
-    navigator.clipboard.writeText(appointmentId);
-    setCopied(true);
-    toast.success('Appointment ID copied!');
-    setTimeout(() => setCopied(false), 2000);
+  const handleCopyAppointmentId = async () => {
+    try {
+      await navigator.clipboard.writeText(appointmentId);
+      setCopied(true);
+      toast.success('Appointment ID copied!');
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Fallback for browsers that block clipboard access
+      toast.error('Could not copy to clipboard');
+    }
   };
 
   const toggleFullscreen = () => {
@@ -181,23 +203,24 @@ export const VideoChat = ({
         "flex-1 relative bg-black rounded-lg overflow-hidden min-h-[200px] sm:min-h-[300px]",
         isFullscreen && "rounded-none min-h-full"
       )}>
-        {/* Remote Video */}
-        {remoteStream ? (
-          <video
-            ref={remoteVideoRef}
-            autoPlay
-            playsInline
-            muted={false}
-            className="w-full h-full object-cover bg-black"
-            onLoadedMetadata={(e) => {
-              const v = e.currentTarget;
-              v.play().catch(() => {
-                console.log('Autoplay blocked, retrying...');
-                setTimeout(() => v.play(), 300);
-              });
-            }}
-          />
-        ) : (
+        {/* Remote Video — always rendered so ref is always valid; visibility controlled by CSS */}
+        <video
+          ref={remoteVideoRef}
+          autoPlay
+          playsInline
+          muted={false}
+          className={cn(
+            "w-full h-full object-cover bg-black",
+            !remoteStream && "hidden"
+          )}
+          onLoadedMetadata={(e: { currentTarget: HTMLVideoElement }) => {
+            const v = e.currentTarget;
+            v.play().catch(() => {
+              setTimeout(() => v.play(), 300);
+            });
+          }}
+        />
+        {!remoteStream && (
           <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-slate-900 to-slate-800 px-4">
             <div className="text-center">
               <div className="text-3xl sm:text-4xl mb-2 sm:mb-4">📞</div>
@@ -213,7 +236,7 @@ export const VideoChat = ({
           </div>
         )}
 
-        {/* Local Video - Picture in Picture */}
+        {/* Local Video - Picture in Picture — always rendered so ref is always valid */}
         <div
           className={cn(
             'absolute rounded-lg overflow-hidden border-2 border-primary cursor-pointer transition-all hover:scale-105',
@@ -223,15 +246,14 @@ export const VideoChat = ({
           )}
           onClick={() => setExpandRemote(!expandRemote)}
         >
-          {localStream ? (
-            <video
-              ref={localVideoRef}
-              autoPlay
-              playsInline
-              muted
-              className="w-full h-full object-cover"
-            />
-          ) : (
+          <video
+            ref={localVideoRef}
+            autoPlay
+            playsInline
+            muted
+            className={cn("w-full h-full object-cover", !localStream && "hidden")}
+          />
+          {!localStream && (
             <div className="w-full h-full bg-slate-700 flex items-center justify-center">
               <span className="text-xs text-gray-400">Camera off</span>
             </div>
@@ -296,7 +318,7 @@ export const VideoChat = ({
                   <input
                     type="checkbox"
                     checked={cameraOffMode}
-                    onChange={(e) => setCameraOffMode(e.target.checked)}
+                    onChange={(e: { target: HTMLInputElement }) => setCameraOffMode(e.target.checked)}
                     className="w-4 h-4"
                   />
                   <span className="text-xs sm:text-sm font-medium truncate">
@@ -308,7 +330,7 @@ export const VideoChat = ({
               <Button
                 onClick={() => {
                   if (cameraOffMode) setVideoEnabled(false);
-                  onStartCall();
+                  onStartCall(!cameraOffMode);
                 }}
                 className="w-full bg-green-600 hover:bg-green-700 text-white gap-2 text-sm sm:text-base"
                 disabled={isCalling}
@@ -340,7 +362,7 @@ export const VideoChat = ({
                   <input
                     type="checkbox"
                     checked={cameraOffMode}
-                    onChange={(e) => setCameraOffMode(e.target.checked)}
+                    onChange={(e: { target: HTMLInputElement }) => setCameraOffMode(e.target.checked)}
                     className="w-4 h-4"
                   />
                   <span className="text-xs sm:text-sm font-medium">
@@ -353,12 +375,12 @@ export const VideoChat = ({
                 <Button
                   onClick={() => {
                     if (cameraOffMode) setVideoEnabled(false);
-                    // FIX 6: iOS Safari requires user gesture to unlock media playback
-                    document.querySelectorAll('video').forEach(v => {
-                      v.muted = false;
-                      v.play().catch(() => {});
+                    // iOS Safari requires user gesture to unlock media playback
+                    // Only touch our own video elements, not every video on the page
+                    [localVideoRef.current, remoteVideoRef.current].forEach(v => {
+                      if (v) { v.muted = false; v.play().catch(() => {}); }
                     });
-                    onAnswerCall();
+                    onAnswerCall(!cameraOffMode);
                   }}
                   className="flex-1 bg-green-600 hover:bg-green-700 text-white gap-2 font-semibold"
                 >
@@ -479,3 +501,5 @@ export const VideoChat = ({
     </div>
   );
 };
+
+

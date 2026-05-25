@@ -99,9 +99,11 @@ export const ProfilePhotoUpload = ({
       
       // Delete old avatar if exists
       if (currentPhotoUrl) {
-        const oldPath = currentPhotoUrl.split("/").pop();
-        if (oldPath) {
-          await supabase.storage.from("avatars").remove([`${userId}/${oldPath}`]);
+        // Extract just the filename from the URL (last path segment)
+        const oldFileName = currentPhotoUrl.split("/").pop();
+        if (oldFileName) {
+          // Storage path must include the userId folder prefix
+          await supabase.storage.from("avatars").remove([`${userId}/${oldFileName}`]);
         }
       }
 
@@ -170,9 +172,9 @@ export const ProfilePhotoUpload = ({
               className="hover:text-red-600 hover:bg-red-50"
               onClick={async () => {
                 try {
-                  const oldPath = currentPhotoUrl.split("/").pop();
-                  if (oldPath) {
-                    await supabase.storage.from("avatars").remove([`${userId}/${oldPath}`]);
+                  const oldFileName = currentPhotoUrl.split("/").pop();
+                  if (oldFileName) {
+                    await supabase.storage.from("avatars").remove([`${userId}/${oldFileName}`]);
                   }
                   await (supabase as any)
                     .from("profiles")

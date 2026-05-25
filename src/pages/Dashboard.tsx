@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Activity, Menu, X, AlertTriangle } from "lucide-react";
-import { supabase } from "@/integrations/supabase/client";
+import { supabase, AUTH_STORAGE_KEY } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import type { User, Session } from "@supabase/supabase-js";
 import { recoverUserRole } from "@/lib/role-recovery";
@@ -28,10 +28,9 @@ interface DashboardProps {
 const Dashboard = ({ showChat = false }: DashboardProps) => {
   const navigate = useNavigate();
   
-  // Initialize n8n chat if showChat is true
-  if (showChat) {
-    useN8nChat();
-  }
+  // Always call hook unconditionally (Rules of Hooks)
+  // The hook itself checks auth state and hides the widget when not needed
+  useN8nChat();
   
   const [user, setUser] = useState<User | null>(null);
   const [session, setSession] = useState<Session | null>(null);
@@ -81,10 +80,10 @@ const Dashboard = ({ showChat = false }: DashboardProps) => {
 
         let roleData = null;
         let roleError = null;
-        let retries = 3;
+        const maxRoleRetries = 3;
 
         // Retry fetching role if it doesn't exist yet (might be a timing issue)
-        while (retries > 0 && !roleData) {
+        for (let attempt = 0; attempt < maxRoleRetries; attempt++) {
           const response = await supabase
             .from("user_roles")
             .select("role")
@@ -92,23 +91,13 @@ const Dashboard = ({ showChat = false }: DashboardProps) => {
 
           if (response.error) {
             roleError = response.error;
-            if (retries > 1) {
-              // Wait 1 second before retrying
-              await new Promise(resolve => setTimeout(resolve, 1000));
-              retries--;
-            } else {
-              retries = 0;
-            }
           } else if (response.data && response.data.length > 0) {
             roleData = response.data[0];
-            retries = 0;
-          } else {
-            if (retries > 1) {
-              await new Promise(resolve => setTimeout(resolve, 1000));
-              retries--;
-            } else {
-              retries = 0;
-            }
+            break;
+          }
+          if (attempt < maxRoleRetries - 1) {
+            // Exponential backoff: 500ms, 1000ms
+            await new Promise(resolve => setTimeout(resolve, 500 * Math.pow(2, attempt)));
           }
         }
 
@@ -166,7 +155,7 @@ const Dashboard = ({ showChat = false }: DashboardProps) => {
       if (event === 'TOKEN_REFRESHED' && !session) {
         // Token refresh failed, sign out
         console.warn('Token refresh failed, signing out');
-        localStorage.removeItem('sb-wvhlrmsugmcdhsaltygg-auth-token');
+        localStorage.removeItem(AUTH_STORAGE_KEY);
         await supabase.auth.signOut();
         navigate("/auth");
       } else if (event === 'SIGNED_OUT' || !session) {
@@ -221,8 +210,7 @@ const Dashboard = ({ showChat = false }: DashboardProps) => {
       }) || [];
 
       // Count emergency bookings (pending only - approved go to history)
-      // @ts-ignore
-      const { count: emergencyCount } = await supabase
+      const { count: emergencyCount } = await (supabase as any)
         .from("emergency_bookings")
         .select("*", { count: "exact", head: true })
         .eq("patient_id", userId)

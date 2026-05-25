@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+﻿import { useState, useEffect } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,6 +11,16 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { FileText, Upload, X, Download, Plus, Trash2, QrCode, Eye } from "lucide-react";
@@ -85,6 +95,8 @@ export const PrescriptionUploadDialog = ({
   const [qrPreviewUrl, setQrPreviewUrl] = useState<string | null>(null);
   const [showQrPreview, setShowQrPreview] = useState(false);
   const [generatingQR, setGeneratingQR] = useState(false);
+  // Confirmation state for delete — avoids blocking window.confirm
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   // Fetch and log doctor info when dialog opens or props change
   useEffect(() => {
@@ -316,10 +328,13 @@ export const PrescriptionUploadDialog = ({
       const a = document.createElement("a");
       a.href = url;
       a.download = `Prescription-${prescription.created_at.split("T")[0]}.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
+      try {
+        document.body.appendChild(a);
+        a.click();
+      } finally {
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+      }
     } catch (error) {
       console.error("Error downloading prescription:", error);
       toast.error("Failed to download prescription");
@@ -327,7 +342,14 @@ export const PrescriptionUploadDialog = ({
   };
 
   const deletePrescription = async (prescriptionId: string) => {
-    if (!window.confirm("Are you sure you want to delete this prescription?")) return;
+    // Use state-based confirmation instead of blocking window.confirm
+    setConfirmDeleteId(prescriptionId);
+  };
+
+  const confirmDelete = async () => {
+    if (!confirmDeleteId) return;
+    const prescriptionId = confirmDeleteId;
+    setConfirmDeleteId(null);
 
     try {
       const { error } = await (supabase as any)
@@ -455,6 +477,7 @@ export const PrescriptionUploadDialog = ({
   };
 
   return (
+  <>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="w-full max-w-2xl max-h-[90vh] overflow-y-auto sm:max-w-md md:max-w-2xl">
         <DialogHeader>
@@ -827,5 +850,27 @@ export const PrescriptionUploadDialog = ({
         </div>
       </DialogContent>
     </Dialog>
+
+    <AlertDialog open={!!confirmDeleteId} onOpenChange={(open) => !open && setConfirmDeleteId(null)}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete Prescription</AlertDialogTitle>
+          <AlertDialogDescription>
+            Are you sure you want to delete this prescription? This action cannot be undone.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={confirmDelete}
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+          >
+            Delete
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  </>
   );
 };
+

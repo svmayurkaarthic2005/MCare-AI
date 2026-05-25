@@ -385,13 +385,15 @@ export const PatientAppointmentHistory = ({ patientId }: { patientId: string }) 
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      // Use first medicine name or generic name if not available
       const medicineName = prescription.medicines?.[0]?.medicine_name || "Prescription";
       a.download = `Prescription-${medicineName}-${prescription.created_at.split("T")[0]}.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
+      try {
+        document.body.appendChild(a);
+        a.click();
+      } finally {
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+      }
     } catch (error) {
       console.error("Error downloading prescription:", error);
       toast.error("Failed to download prescription");

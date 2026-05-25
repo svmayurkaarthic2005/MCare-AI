@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Calendar, Clock, CheckCircle, XCircle, AlertCircle, AlertTriangle, Video } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -48,12 +48,17 @@ export const PatientAppointments = ({ patientId }: { patientId: string }) => {
   const [loading, setLoading] = useState(true);
   const [videoChatOpen, setVideoChatOpen] = useState(false);
   const [selectedAppointmentForVideo, setSelectedAppointmentForVideo] = useState<AnyAppointment | null>(null);
+  // Ref so realtime callbacks always call the latest fetchAppointments without stale closure
+  const fetchAppointmentsRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     if (patientId) {
       fetchAppointments();
     }
   }, [patientId]);
+
+  // Keep ref in sync so realtime callbacks always use the latest version
+  fetchAppointmentsRef.current = fetchAppointments;
 
   // Real-time subscription for appointments
   useEffect(() => {
@@ -73,7 +78,7 @@ export const PatientAppointments = ({ patientId }: { patientId: string }) => {
             filter: `patient_id=eq.${patientId}`
           },
           () => {
-            fetchAppointments();
+            fetchAppointmentsRef.current();
           }
         )
         .subscribe((status) => {
@@ -86,7 +91,7 @@ export const PatientAppointments = ({ patientId }: { patientId: string }) => {
             console.warn('Realtime subscription unavailable for appointments, falling back to polling');
             if (!pollingInterval) {
               pollingInterval = window.setInterval(() => {
-                fetchAppointments();
+                fetchAppointmentsRef.current();
               }, 10000) as unknown as number;
             }
           }
@@ -104,7 +109,7 @@ export const PatientAppointments = ({ patientId }: { patientId: string }) => {
             filter: `patient_id=eq.${patientId}`
           },
           () => {
-            fetchAppointments();
+            fetchAppointmentsRef.current();
           }
         )
         .subscribe();
@@ -123,7 +128,7 @@ export const PatientAppointments = ({ patientId }: { patientId: string }) => {
     } catch (error) {
       console.error('Failed to set up realtime subscription, using polling:', error);
       pollingInterval = window.setInterval(() => {
-        fetchAppointments();
+        fetchAppointmentsRef.current();
       }, 10000) as unknown as number;
       return () => {
         if (pollingInterval) {

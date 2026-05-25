@@ -164,16 +164,6 @@ All colors MUST be HSL.
     -webkit-touch-callout: none;
   }
 
-  /* Hardware acceleration for transforms and animations */
-  /* Hardware acceleration for specific interactive elements only */
-  button:active,
-  a:active {
-    -webkit-transform: translateZ(0);
-    transform: translateZ(0);
-    -webkit-backface-visibility: hidden;
-    backface-visibility: hidden;
-  }
-
   /* Smooth scrolling for scroll containers */
   [class*="overflow"],
   [class*="scroll"] {
