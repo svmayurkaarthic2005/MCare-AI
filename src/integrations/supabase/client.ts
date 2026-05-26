@@ -17,6 +17,15 @@ if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
 const projectRef = SUPABASE_URL.match(/https:\/\/([^.]+)\.supabase\.co/)?.[1] ?? 'local';
 export const AUTH_STORAGE_KEY = `sb-${projectRef}-auth-token`;
 
+// Debug: log the resolved Supabase URL to help diagnose 404s from PostgREST endpoints
+// Remove this in production
+try {
+  // eslint-disable-next-line no-console
+  console.info('[debug] Supabase URL:', SUPABASE_URL);
+} catch (e) {
+  // ignore
+}
+
 // Import the supabase client like this:
 // import { supabase } from "@/integrations/supabase/client";
 

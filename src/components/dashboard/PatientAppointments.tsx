@@ -150,7 +150,14 @@ export const PatientAppointments = ({ patientId }: { patientId: string }) => {
         .in("status", ["pending", "approved"])
         .order("appointment_date", { ascending: true });
 
-      if (apptError) throw apptError;
+      if (apptError) {
+        console.error('Appointment fetch error (appointments):', apptError);
+        // Surface HTTP status if available for easier debugging (e.g., 404)
+        // @ts-ignore
+        const statusInfo = apptError?.status || apptError?.statusCode || apptError?.code;
+        toast.error(`Failed to load appointments (${statusInfo || 'unknown error'})`);
+        throw apptError;
+      }
 
       // Filter out appointments that have passed
       const upcomingAppointments = (appointmentsData as any[])?.filter((apt: any) => {
@@ -251,9 +258,31 @@ export const PatientAppointments = ({ patientId }: { patientId: string }) => {
 
       setAppointments(allAppointments);
       setLoading(false);
-    } catch (error) {
+    } catch (error: any) {
+      // Log full error shape to help identify 404s or misconfigured endpoints
       console.error("Error fetching appointments:", error);
-      toast.error("Failed to load appointments");
+
+      // If supabase postgrest error contains response details, log them
+      try {
+        if (error?.response) {
+          console.error('Error response object:', error.response);
+          // Some SDK errors include a url/status/body
+          const respUrl = error.response.url || error?.url || null;
+          const respStatus = error.response.status || error?.status || error?.statusCode || null;
+          console.error('Response URL:', respUrl, 'Status:', respStatus);
+        }
+      } catch (e) {
+        console.warn('Could not inspect error.response', e);
+      }
+
+      try {
+        const status = error?.status || error?.statusCode || error?.code || (error?.response && error.response.status) || 'unknown';
+        const message = error?.message || error?.msg || error?.details || JSON.stringify(error);
+        toast.error(`Failed to load appointments (${status}): ${message}`);
+      } catch (e) {
+        toast.error("Failed to load appointments");
+      }
+
       setLoading(false);
     }
   };
