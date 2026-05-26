@@ -91,13 +91,15 @@ export const formatAppointmentDateIST = (date: Date | string): string => {
 };
 
 /**
- * Check if appointment time has passed (using IST)
+ * Check if appointment time has passed (using UTC epoch comparison)
+ * appointmentDate is stored as UTC ISO string; Date.now() is also UTC epoch.
+ * This avoids the mismatch between a UTC Date and a locally-constructed IST Date.
  */
 export const hasAppointmentPassed = (appointmentDate: string): boolean => {
+  if (!appointmentDate) return false;
   const appointmentTime = new Date(appointmentDate);
-  const currentTime = getCurrentISTTime();
-  // Convert both to UTC for accurate comparison
-  return appointmentTime.getTime() < currentTime.getTime();
+  // Compare UTC epoch values directly — no timezone offset confusion
+  return appointmentTime.getTime() < Date.now();
 };
 
 /**
@@ -106,9 +108,7 @@ export const hasAppointmentPassed = (appointmentDate: string): boolean => {
  */
 export const isWithin5MinutesOfAppointment = (appointmentDate: string): boolean => {
   const appointmentTime = new Date(appointmentDate);
-  const currentTime = getCurrentISTTime();
-  
-  const timeDifferenceMs = appointmentTime.getTime() - currentTime.getTime();
+  const timeDifferenceMs = appointmentTime.getTime() - Date.now();
   const timeDifferenceMinutes = timeDifferenceMs / (1000 * 60);
   
   // Show button if within 5 minutes before appointment or appointment has started (up to 1 hour after)
@@ -121,9 +121,7 @@ export const isWithin5MinutesOfAppointment = (appointmentDate: string): boolean 
  */
 export const canStartVideoCall = (appointmentDate: string): boolean => {
   const appointmentTime = new Date(appointmentDate);
-  const currentTime = getCurrentISTTime();
-  
-  const timeDifferenceMs = appointmentTime.getTime() - currentTime.getTime();
+  const timeDifferenceMs = appointmentTime.getTime() - Date.now();
   const timeDifferenceMinutes = timeDifferenceMs / (1000 * 60);
   
   // Show button if within 30 minutes before appointment or up to 1 hour after start
