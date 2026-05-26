@@ -58,7 +58,8 @@ export const PatientAppointments = ({ patientId }: { patientId: string }) => {
   }, [patientId]);
 
   // Keep ref in sync so realtime callbacks always use the latest version
-  fetchAppointmentsRef.current = fetchAppointments;
+  // NOTE: `fetchAppointments` is declared below; do not reference it here to avoid TDZ.
+  // The ref will be updated after `fetchAppointments` is defined.
 
   // Real-time subscription for appointments
   useEffect(() => {
@@ -286,6 +287,12 @@ export const PatientAppointments = ({ patientId }: { patientId: string }) => {
       setLoading(false);
     }
   };
+
+  // After declaring fetchAppointments, keep ref in sync so realtime callbacks always use the latest version
+  // Use useEffect to avoid reading function before initialization during render
+  useEffect(() => {
+    fetchAppointmentsRef.current = fetchAppointments;
+  }, [fetchAppointments]);
 
   const cancelAppointment = async (appointmentId: string, appointmentDate: string) => {
     // Check if appointment time has passed (using IST)

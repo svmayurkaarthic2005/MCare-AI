@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { Activity, Menu, X, AlertTriangle } from "lucide-react";
 import { supabase, AUTH_STORAGE_KEY } from "@/integrations/supabase/client";
 import { toast } from "sonner";
@@ -15,6 +15,7 @@ import { BloodReportAnalysis } from "@/components/dashboard/BloodReportAnalysis"
 import { AvailableDoctors } from "@/components/dashboard/AvailableDoctors";
 import { PatientAppointments } from "@/components/dashboard/PatientAppointments";
 import { PatientAppointmentHistory } from "@/components/dashboard/PatientAppointmentHistory";
+import ErrorBoundary from "@/components/ErrorBoundary";
 import { EmergencyBookingDialog } from "@/components/dashboard/EmergencyBookingDialog";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -47,6 +48,12 @@ const Dashboard = ({ showChat = false }: DashboardProps) => {
   });
 
   useEffect(() => {
+    // If route is /dashboard/appointments, switch to appointments tab
+    const loc = window.location.pathname || '';
+    if (loc.endsWith('/appointments')) {
+      setActiveTab('appointments');
+    }
+
     let isMounted = true;
 
     const fetchUserData = async (userId: string) => {
@@ -422,12 +429,16 @@ const Dashboard = ({ showChat = false }: DashboardProps) => {
 
           {/* Upcoming Appointments Tab */}
           <TabsContent value="appointments" className="space-y-8">
-            <PatientAppointments patientId={user.id} />
+            <ErrorBoundary>
+              <PatientAppointments patientId={user.id} />
+            </ErrorBoundary>
           </TabsContent>
 
           {/* History Tab */}
           <TabsContent value="history" className="space-y-8">
-            <PatientAppointmentHistory patientId={user.id} />
+            <ErrorBoundary>
+              <PatientAppointmentHistory patientId={user.id} />
+            </ErrorBoundary>
           </TabsContent>
         </Tabs>
 
