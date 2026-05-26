@@ -22,6 +22,7 @@ import { toast } from 'sonner';
 interface VideoChatDialogProps {
   isOpen: boolean;
   onClose: () => void;
+  onOpen?: () => void; // called when dialog auto-opens due to incoming call
   appointmentId: string;
   patientId: string;
   doctorId: string;
@@ -33,6 +34,7 @@ interface VideoChatDialogProps {
 export const VideoChatDialog = ({
   isOpen,
   onClose,
+  onOpen,
   appointmentId,
   patientId,
   doctorId,
@@ -53,6 +55,15 @@ export const VideoChatDialog = ({
     remoteUserId
   );
 
+  // Auto-open the dialog when an incoming call arrives (isAnswering set by handleOffer)
+  // This handles the case where the doctor hasn't clicked "Call" yet but the patient called.
+  useEffect(() => {
+    if (!isOpen && callState.isAnswering && onOpen) {
+      console.log('[VideoChatDialog] Incoming call detected — auto-opening dialog');
+      onOpen();
+    }
+  }, [callState.isAnswering, isOpen, onOpen]);
+
   // Only show video chat if consultation is online
   useEffect(() => {
     if (isOpen && consultationType !== 'online') {
@@ -60,6 +71,19 @@ export const VideoChatDialog = ({
       onClose();
     }
   }, [isOpen, consultationType, onClose]);
+
+  // Re-attach remote stream to video element when dialog opens.
+  // Race condition: stream may arrive before the dialog (and its <video> ref) is mounted.
+  // When isOpen becomes true, VideoChat mounts and its refs become valid — re-trigger attachment.
+  useEffect(() => {
+    if (isOpen && callState.remoteStream) {
+      // Small delay to let the DOM settle after dialog open animation
+      const t = setTimeout(() => {
+        callActions.setRemoteStream(callState.remoteStream);
+      }, 100);
+      return () => clearTimeout(t);
+    }
+  }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleClose = () => {
     if (callState.isCallActive || callState.isCalling || callState.isAnswering) {
@@ -75,20 +99,23 @@ export const VideoChatDialog = ({
 
   return (
     <>
-      <Dialog open={isOpen} onOpenChange={handleClose}>
-        <DialogContent className="max-w-4xl w-[95vw] sm:h-[90vh] h-[95vh] flex flex-col p-4 sm:p-6">
-          <DialogHeader className="flex-shrink-0">
-            <DialogTitle className="flex items-center justify-between pr-8">
-              <span className="text-lg sm:text-xl">Video Appointment with {doctorName}</span>
+      <Dialog open={isOpen} onOpenChange={(open) => { if (!open) handleClose(); }}>
+        {/* Dialog fills most of the viewport; inner content is a flex column */}
+        <DialogContent className="max-w-2xl w-[95vw] h-[92vh] max-h-[92vh] flex flex-col p-0 gap-0 overflow-hidden">
+          {/* Header — fixed, never scrolls */}
+          <DialogHeader className="flex-shrink-0 px-4 pt-4 pb-2 sm:px-5 sm:pt-5 border-b border-border/40">
+            <DialogTitle className="flex items-center justify-between pr-6 text-base sm:text-lg">
+              <span className="truncate">Video Appointment — {doctorName}</span>
               {callState.isCallActive && (
-                <span className="text-xs px-2 py-1 bg-green-500/20 text-green-500 rounded-full animate-pulse">
-                  Call Active
+                <span className="flex-shrink-0 text-xs px-2 py-0.5 bg-green-500/20 text-green-500 rounded-full animate-pulse ml-2">
+                  Live
                 </span>
               )}
             </DialogTitle>
           </DialogHeader>
 
-          <div className="flex-1 overflow-hidden min-h-0">
+          {/* VideoChat fills the remaining height; it manages its own internal layout */}
+          <div className="flex-1 min-h-0 overflow-hidden p-3 sm:p-4">
             <VideoChat
               localStream={callState.localStream}
               remoteStream={callState.remoteStream}

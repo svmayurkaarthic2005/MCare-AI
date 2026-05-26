@@ -718,7 +718,49 @@ export const AppointmentManagement = ({ doctorId }: { doctorId: string }) => {
         </Dialog>
       )}
 
-      {selectedAppointmentForVideo && (
+      {/* Pre-mount VideoChatDialog for approved online appointments in the call window.
+          This ensures the WebRTC signaling channel is subscribed BEFORE the patient calls,
+          so the doctor receives the offer even if they haven't clicked the Call button yet.
+          When isAnswering becomes true (offer received), the dialog auto-opens. */}
+      {appointments
+        .filter(apt =>
+          apt.status === 'approved' &&
+          canStartVideoCall(apt.appointment_date) &&
+          (!apt.consultation_type || apt.consultation_type === 'online') &&
+          !apt.isEmergency
+        )
+        .map(apt => (
+          <VideoChatDialog
+            key={`pre-${apt.id}`}
+            isOpen={videoChatOpen && selectedAppointmentForVideo?.id === apt.id}
+            onOpen={() => {
+              // Patient called — auto-open the dialog for this appointment
+              setSelectedAppointmentForVideo(apt);
+              setVideoChatOpen(true);
+            }}
+            onClose={() => {
+              setVideoChatOpen(false);
+              setSelectedAppointmentForVideo(null);
+            }}
+            appointmentId={apt.id}
+            patientId={apt.patient_id}
+            doctorId={doctorId}
+            doctorName={apt.patient_name || "Patient"}
+            userRole="doctor"
+            consultationType={apt.consultation_type || 'online'}
+          />
+        ))
+      }
+
+      {/* Also render the selected appointment dialog if it's not already covered above
+          (e.g. emergency bookings or appointments outside the pre-mount filter) */}
+      {selectedAppointmentForVideo &&
+        !(
+          selectedAppointmentForVideo.status === 'approved' &&
+          canStartVideoCall(selectedAppointmentForVideo.appointment_date) &&
+          (!selectedAppointmentForVideo.consultation_type || selectedAppointmentForVideo.consultation_type === 'online') &&
+          !selectedAppointmentForVideo.isEmergency
+        ) && (
         <VideoChatDialog
           isOpen={videoChatOpen}
           onClose={() => {

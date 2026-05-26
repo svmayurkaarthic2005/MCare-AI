@@ -13,7 +13,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { hasAppointmentPassed, formatAppointmentDateIST, getCurrentISTTime, canStartVideoCall } from "@/lib/istTimezone";
+import { hasAppointmentPassed, formatAppointmentDateIST, canStartVideoCall } from "@/lib/istTimezone";
 import { VideoChatDialog } from "./VideoChatDialog";
 
 interface Appointment {
@@ -141,7 +141,8 @@ export const PatientAppointments = ({ patientId }: { patientId: string }) => {
 
   const fetchAppointments = async () => {
     try {
-      const now = getCurrentISTTime();
+      // Use UTC epoch for comparison — appointment_date is stored as UTC ISO string
+      const nowMs = Date.now();
       
       // Fetch regular appointments
       const { data: appointmentsData, error: apptError } = await (supabase as any)
@@ -160,10 +161,10 @@ export const PatientAppointments = ({ patientId }: { patientId: string }) => {
         throw apptError;
       }
 
-      // Filter out appointments that have passed
+      // Filter out appointments that have passed — compare UTC epoch values directly
       const upcomingAppointments = (appointmentsData as any[])?.filter((apt: any) => {
-        const aptDate = new Date(apt.appointment_date);
-        if ((apt.status === "pending" || apt.status === "approved") && aptDate < now) {
+        const aptMs = new Date(apt.appointment_date).getTime();
+        if ((apt.status === "pending" || apt.status === "approved") && aptMs < nowMs) {
           return false;
         }
         return true;

@@ -108,6 +108,9 @@ export const useWebRTCCall = (
   const channelInitializedRef = useRef<boolean>(false);
   // FIX: Stable ref to endCall so initializePeerConnection can call it without stale closure
   const endCallRef = useRef<(fromRemote?: boolean) => void>(() => {});
+  // FIX: Persistent remote MediaStream — never recreated, tracks are added/removed in place.
+  // Creating new MediaStream() on every ontrack event breaks video rendering on some browsers.
+  const remoteStreamRef = useRef<MediaStream>(new MediaStream());
 
   // Build ICE servers configuration with reliable TURN fallback
   const getIceServers = useCallback(async (): Promise<RTCConfiguration> => {
@@ -137,11 +140,12 @@ export const useWebRTCCall = (
       const { data, error } = await supabase.functions.invoke('turn');
       
       if (error || !data) {
-        console.warn('[WebRTC] TURN fetch failed, using Metered.ca fallback:', error);
+        console.warn('[WebRTC] TURN fetch failed, using fallback:', error);
         return {
           iceServers: [
-            ...fallbackTurnServers,
             { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:global.stun.twilio.com:3478' },
+            ...fallbackTurnServers,
           ],
           iceCandidatePoolSize: 10,
           bundlePolicy: 'max-bundle',
@@ -153,6 +157,8 @@ export const useWebRTCCall = (
       
       return {
         iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:global.stun.twilio.com:3478' },
           // Cloudflare TURN (primary)
           {
             urls: data.urls,
@@ -161,8 +167,6 @@ export const useWebRTCCall = (
           },
           // Metered.ca TURN (fallback)
           ...fallbackTurnServers,
-          // STUN (last resort)
-          { urls: 'stun:stun.l.google.com:19302' },
         ],
         iceCandidatePoolSize: 10,
         bundlePolicy: 'max-bundle',
@@ -172,8 +176,9 @@ export const useWebRTCCall = (
       console.error('[WebRTC] Error fetching TURN credentials:', err);
       return {
         iceServers: [
-          ...fallbackTurnServers,
           { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:global.stun.twilio.com:3478' },
+          ...fallbackTurnServers,
         ],
         iceCandidatePoolSize: 10,
         bundlePolicy: 'max-bundle',
@@ -274,10 +279,21 @@ export const useWebRTCCall = (
   // Pass isInitiator to control transceiver creation
   const initializePeerConnection = useCallback(async (forInitiator: boolean = true) => {
     try {
-      // Prevent creating multiple peer connections
+      // Close any existing peer connection before creating a new one
       if (peerConnectionRef.current) {
-        console.log('[WebRTC] Reusing existing peerConnection');
-        return peerConnectionRef.current;
+        console.log('[WebRTC] Closing stale peerConnection before creating new one');
+        peerConnectionRef.current.close();
+        peerConnectionRef.current = null;
+      }
+
+      // If the existing local stream has ended tracks, clear it so a fresh one is acquired
+      if (localStreamRef.current) {
+        const allEnded = localStreamRef.current.getTracks().every(t => t.readyState === 'ended');
+        if (allEnded) {
+          console.log('[WebRTC] Clearing stale localStream (all tracks ended)');
+          localStreamRef.current = null;
+          setState((prev) => ({ ...prev, localStream: null }));
+        }
       }
       const configuration = await getIceServers();
       console.log('[WebRTC] Creating peer connection with config:', configuration);
@@ -325,9 +341,8 @@ export const useWebRTCCall = (
         }
       };
 
-      // FIX: Safari/some Chrome versions don't populate event.streams
-      // Always use MediaStream fallback to ensure tracks are received
-      // FIX (DESKTOP CHROME): Create NEW MediaStream object (immutable) to force React re-render
+      // FIX: Use persistent remoteStreamRef — add tracks in place, never recreate the stream.
+      // Creating new MediaStream() on every ontrack event breaks video rendering on some browsers.
       peerConnection.ontrack = (event) => {
         const track = event.track;
 
@@ -338,34 +353,41 @@ export const useWebRTCCall = (
           id: track.id,
         });
 
-        setState((prev) => {
-          const stream = prev.remoteStream ?? new MediaStream();
-
-          if (!stream.getTracks().some(t => t.id === track.id)) {
-            stream.addTrack(track);
-            console.log('[WebRTC] Added remote track:', track.kind, 'Total tracks:', stream.getTracks().length);
+        // Prefer event.streams[0] if available (most browsers populate it)
+        const sourceStream = event.streams?.[0];
+        if (sourceStream) {
+          sourceStream.getTracks().forEach(t => {
+            if (!remoteStreamRef.current.getTracks().some(existing => existing.id === t.id)) {
+              remoteStreamRef.current.addTrack(t);
+              console.log('[WebRTC] Added remote track from event.streams[0]:', t.kind);
+            }
+          });
+        } else {
+          // Fallback: add the track directly
+          if (!remoteStreamRef.current.getTracks().some(t => t.id === track.id)) {
+            remoteStreamRef.current.addTrack(track);
+            console.log('[WebRTC] Added remote track (fallback):', track.kind);
           }
+        }
 
-          // FIX (DESKTOP CHROME): Return NEW MediaStream object (forces React re-render)
-          return {
-            ...prev,
-            remoteStream: new MediaStream(stream.getTracks())
-          };
-        });
+        console.log('[WebRTC] Remote stream total tracks:', remoteStreamRef.current.getTracks().length);
 
-        // Handle track events
-        track.onmute = () => {
-          console.log('[WebRTC] Remote track muted:', track.kind);
-        };
+        // Give React a new MediaStream wrapper so it detects a state change and re-renders.
+        // The underlying tracks are the same live objects — only the wrapper is new.
+        // This is safe: VideoChat's useEffect checks `video.srcObject !== remoteStream`
+        // so it only reassigns srcObject when the reference changes, which is what we want.
+        setState((prev) => ({
+          ...prev,
+          remoteStream: new MediaStream(remoteStreamRef.current.getTracks()),
+        }));
 
-        track.onunmute = () => {
-          console.log('[WebRTC] Remote track unmuted:', track.kind);
-        };
+        track.onmute   = () => console.log('[WebRTC] Remote track muted:',   track.kind);
+        track.onunmute = () => console.log('[WebRTC] Remote track unmuted:', track.kind);
       };
 
       peerConnection.onconnectionstatechange = () => {
         const connectionState = peerConnection.connectionState;
-        console.log('[WebRTC] Connection state:', connectionState);
+        console.log('[WebRTC] connectionState:', connectionState, '| signalingState:', peerConnection.signalingState);
 
         switch (connectionState) {
           case 'connecting':
@@ -424,7 +446,7 @@ export const useWebRTCCall = (
       };
 
       peerConnection.oniceconnectionstatechange = () => {
-        console.log('[WebRTC] ICE connection state:', peerConnection.iceConnectionState);
+        console.log('[WebRTC] iceConnectionState:', peerConnection.iceConnectionState, '| signalingState:', peerConnection.signalingState);
         
         if (peerConnection.iceConnectionState === 'failed') {
           console.log('[WebRTC] ICE failed, attempting restart');
@@ -542,7 +564,9 @@ export const useWebRTCCall = (
       // Initialize peer connection first (as initiator)
       const peerConnection = await initializePeerConnection(true);
 
-      // Get media stream using ref to prevent duplicate tracks
+      // CRITICAL: Always add tracks to the peer connection.
+      // The PC is freshly created (initializePeerConnection closes the old one),
+      // so it has no senders yet regardless of whether localStreamRef exists.
       if (!localStreamRef.current) {
         const stream = await getMediaStream(videoEnabled);
         localStreamRef.current = stream;
@@ -553,26 +577,14 @@ export const useWebRTCCall = (
           isVideoEnabledRef.current = false;
           stream.getVideoTracks().forEach(t => { t.enabled = false; });
         }
-
-        // Add or replace tracks to peer connection (prefer replaceTrack to avoid duplicate senders)
-        for (const track of stream.getTracks()) {
-          try {
-            const kind = track.kind;
-            const existingSender = peerConnection.getSenders().find(s => s.track?.kind === kind);
-            if (existingSender && existingSender.replaceTrack) {
-              await existingSender.replaceTrack(track);
-              console.log('[WebRTC] Replaced existing sender track for', kind);
-            } else {
-              peerConnection.addTrack(track, stream);
-              console.log('[WebRTC] Added local track via addTrack:', kind);
-            }
-          } catch (err) {
-            console.warn('[WebRTC] Error adding/replacing local track:', err);
-            // Fallback to addTrack if replaceTrack fails
-            try { peerConnection.addTrack(track, stream); } catch (e) { console.error(e); }
-          }
-        }
       }
+
+      // Add tracks from the (possibly pre-existing) stream to the fresh PC
+      const streamToAdd = localStreamRef.current!;
+      streamToAdd.getTracks().forEach((track) => {
+        console.log('[WebRTC] Adding local track:', track.kind);
+        peerConnection.addTrack(track, streamToAdd);
+      });
 
       // Create and send offer
       const offer = await peerConnection.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
@@ -623,8 +635,11 @@ export const useWebRTCCall = (
     }
   }, [initializePeerConnection, getMediaStream, userRole, userId]);
 
-  // Answer call (receiver)
-  // FIX 2: Ensure tracks are added BEFORE creating answer (mandatory for proper transceiver config)
+  // Answer call (receiver).
+  // This owns the COMPLETE answerer flow:
+  //   getUserMedia → addTrack → createAnswer → setLocalDescription → send answer
+  // handleOffer only does setRemoteDescription + shows the incoming-call UI.
+  // Nothing else should touch SDP on the answerer side.
   const answerCall = useCallback(async (videoEnabled: boolean = true) => {
     try {
       setState((prev) => ({ ...prev, isAnswering: true, error: null, connectionStatus: 'connecting' }));
@@ -635,36 +650,56 @@ export const useWebRTCCall = (
         throw new Error('No incoming call to answer. Please wait for the call.');
       }
 
-      // FIX 2: CRITICAL - Ensure tracks exist before creating answer
-      // This ensures transceivers are properly configured
-      if (!localStreamRef.current) {
-        console.log('[WebRTC] Getting media for answer...');
-        const stream = await getMediaStream(videoEnabled);
-        localStreamRef.current = stream;
-        setState((prev) => ({ ...prev, localStream: stream }));
+      // Acquire media and add tracks now — this is the ONLY place addTrack is called
+      // for the answerer. handleOffer must NOT call addTrack.
+      if (!videoEnabled) isVideoEnabledRef.current = false;
 
-        // Apply initial video enabled state
-        if (!videoEnabled) {
-          isVideoEnabledRef.current = false;
-          stream.getVideoTracks().forEach(t => { t.enabled = false; });
+      try {
+        if (!localStreamRef.current) {
+          const stream = await getMediaStream(videoEnabled);
+          localStreamRef.current = stream;
+          setState((prev) => ({ ...prev, localStream: stream }));
         }
-        
-        stream.getTracks().forEach((track) => {
-          console.log('[WebRTC] Adding track before answer:', track.kind);
-          peerConnection.addTrack(track, stream);
+
+        // Apply video-enabled preference to the stream
+        if (!videoEnabled) {
+          localStreamRef.current.getVideoTracks().forEach(t => { t.enabled = false; });
+        }
+
+        // Add each track only if it isn't already in a sender (guard against double-answer).
+        // Check by track.id rather than sender count — more precise, handles partial state.
+        const stream = localStreamRef.current;
+        stream.getTracks().forEach(track => {
+          const alreadyAdded = peerConnection
+            .getSenders()
+            .some(sender => sender.track?.id === track.id);
+          if (!alreadyAdded) {
+            console.log('[WebRTC] answerCall addTrack:', track.kind);
+            peerConnection.addTrack(track, stream);
+          } else {
+            console.log('[WebRTC] answerCall: track already added, skipping:', track.kind);
+          }
         });
-        console.log('[WebRTC] All tracks added, now creating answer');
+        console.log('[WebRTC] Answerer tracks ready');
+      } catch (mediaError) {
+        console.error('[WebRTC] Failed to get media in answerCall:', mediaError);
+        const mediaErrorMsg = mediaError instanceof Error ? mediaError.message : 'Device error';
+        setState((prev) => ({ ...prev, isAnswering: false, error: mediaErrorMsg, connectionStatus: 'failed' }));
+        toast.error(`Cannot answer call: ${mediaErrorMsg}`);
+        if (signalChannelRef.current) {
+          signalChannelRef.current.send({
+            type: 'broadcast',
+            event: 'call-end',
+            payload: { senderId: userId, reason: 'media-unavailable' },
+          });
+        }
+        return;
       }
 
-      // FIX 2: CRITICAL - Wait one frame for transceiver config to stabilize
-      await new Promise(r => requestAnimationFrame(r));
-
-      // Create and send answer
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
 
       console.log('[WebRTC] Answer created and setLocalDescription');
-      console.log('[WebRTC] Sending answer');
       if (!signalChannelRef.current) {
         throw new Error('Signaling channel disconnected. Cannot send answer.');
       }
@@ -677,9 +712,9 @@ export const useWebRTCCall = (
           senderId: userId,
         },
       });
+      console.log('[WebRTC] Answer sent');
 
       setState((prev) => ({ ...prev, isAnswering: false, incomingCall: false }));
-      toast.success('Call connected');
     } catch (error) {
       console.error('[WebRTC] Error answering call:', error);
       const errorMsg = error instanceof Error ? error.message : 'Unknown error';
@@ -691,7 +726,7 @@ export const useWebRTCCall = (
       }));
       toast.error(errorMsg);
     }
-  }, [getMediaStream, userId]);
+  }, [userId, getMediaStream]);
 
   // End call
   // FIX: Use localStreamRef instead of state.localStream to avoid stale closure
@@ -716,46 +751,24 @@ export const useWebRTCCall = (
       localStreamRef.current = null;
     }
 
-    // Stop remote tracks if present to free media resources and avoid black screens
-    try {
-      setState((prev) => {
-        if (prev.remoteStream) {
-          try {
-            prev.remoteStream.getTracks().forEach((t) => { try { t.stop(); } catch {} });
-            console.log('[WebRTC] Stopped remote tracks');
-          } catch (e) {
-            console.warn('[WebRTC] Error stopping remote tracks', e);
-          }
-        }
+    // NOTE: Do NOT stop remote tracks — they are owned by the remote peer.
+    // Stopping them causes black screen and broken audio on the remote side.
 
-        return {
-          localStream: null,
-          remoteStream: null,
-          isCallActive: false,
-          isCalling: false,
-          isAnswering: false,
-          incomingCall: false,
-          callerName: null,
-          error: null,
-          connectionStatus: 'idle',
-          networkQuality: 'unknown',
-        };
-      });
-    } catch (e) {
-      console.warn('[WebRTC] Error resetting state during endCall', e);
-      setState({
-        localStream: null,
-        remoteStream: null,
-        isCallActive: false,
-        isCalling: false,
-        isAnswering: false,
-        incomingCall: false,
-        callerName: null,
-        error: null,
-        connectionStatus: 'idle',
-        networkQuality: 'unknown',
-      });
-    }
+    // Reset the persistent remote stream for the next call
+    remoteStreamRef.current.getTracks().forEach(t => remoteStreamRef.current.removeTrack(t));
+
+    setState({
+      localStream: null,
+      remoteStream: null,
+      isCallActive: false,
+      isCalling: false,
+      isAnswering: false,
+      incomingCall: false,
+      callerName: null,
+      error: null,
+      connectionStatus: 'idle',
+      networkQuality: 'unknown',
+    });
 
     // Close peer connection
     if (peerConnectionRef.current) {
@@ -777,8 +790,6 @@ export const useWebRTCCall = (
       clearTimeout(callTimeoutRef.current);
       callTimeoutRef.current = null;
     }
-
-    // state already reset above
 
     isInitiatorRef.current = false;
     reconnectAttemptRef.current = 0;
@@ -977,83 +988,9 @@ export const useWebRTCCall = (
         });
 
         await peerConnection.setRemoteDescription(offer);
-        console.log('[WebRTC] Set remote offer');
+        console.log('[WebRTC] Set remote offer — waiting for user to answer');
 
-        // FIX: For answerer, use replaceTrack on transceivers from offer SDP
-        // This ensures audio/video tracks are properly sent to the caller
-        try {
-          if (!localStreamRef.current) {
-            // Respect the user's camera preference (set via cameraOffMode before call)
-            const stream = await getMediaStream(isVideoEnabledRef.current);
-            localStreamRef.current = stream;
-            setState((prev) => ({ ...prev, localStream: stream }));
-            
-            const audioTrack = stream.getAudioTracks()[0];
-            const videoTrack = stream.getVideoTracks()[0];
-            
-            // Get transceivers created from offer and replace tracks
-            const transceivers = peerConnection.getTransceivers();
-            console.log('[WebRTC] Answerer transceivers:', transceivers.length);
-            
-            // Prefer replacing sender tracks where possible
-            for (const transceiver of transceivers) {
-              try {
-                // Use sender.kind as indicator where available
-                const senderKind = transceiver.sender?.track?.kind || transceiver.receiver?.track?.kind || transceiver.mid;
-                if (transceiver.sender && transceiver.sender.replaceTrack) {
-                  if (audioTrack && (transceiver.sender.track?.kind === 'audio' || !transceiver.sender.track)) {
-                    await transceiver.sender.replaceTrack(audioTrack);
-                    console.log('[WebRTC] Replaced audio track on transceiver');
-                    continue;
-                  }
-                  if (videoTrack && (transceiver.sender.track?.kind === 'video' || !transceiver.sender.track)) {
-                    await transceiver.sender.replaceTrack(videoTrack);
-                    console.log('[WebRTC] Replaced video track on transceiver');
-                    continue;
-                  }
-                }
-              } catch (e) {
-                console.warn('[WebRTC] replaceTrack failed on transceiver, will fallback to addTrack', e);
-              }
-            }
-            
-            // Fallback: If transceivers don't have tracks, use addTrack
-            const hasAudioSender = transceivers.some(t => t.sender.track?.kind === 'audio');
-            const hasVideoSender = transceivers.some(t => t.sender.track?.kind === 'video');
-            
-            if (!hasAudioSender && audioTrack) {
-              peerConnection.addTrack(audioTrack, stream);
-              console.log('[WebRTC] Added audio track via addTrack fallback');
-            }
-            if (!hasVideoSender && videoTrack) {
-              peerConnection.addTrack(videoTrack, stream);
-              console.log('[WebRTC] Added video track via addTrack fallback');
-            }
-            
-            console.log('[WebRTC] Answerer tracks configured');
-          } else {
-            console.log('[WebRTC] Local tracks already added in handleOffer');
-          }
-        } catch (mediaError) {
-          console.error('[WebRTC] Failed to get media in handleOffer:', mediaError);
-          // FIX #2: Notify caller that we cannot answer due to media unavailable
-          // This prevents caller from waiting indefinitely
-          const mediaErrorMsg = mediaError instanceof Error ? mediaError.message : 'Device error';
-          toast.error(`Cannot answer call: ${mediaErrorMsg}`);
-          if (signalChannelRef.current) {
-            signalChannelRef.current.send({
-              type: 'broadcast',
-              event: 'call-end',
-              payload: { 
-                senderId: userId,
-                reason: 'media-unavailable',
-              },
-            });
-          }
-          return;
-        }
-
-        // Process buffered ICE candidates
+        // Process any ICE candidates that arrived before the remote description was set.
         for (const candidate of pendingIceCandidatesRef.current) {
           try {
             await peerConnection.addIceCandidate(candidate);
@@ -1063,45 +1000,16 @@ export const useWebRTCCall = (
         }
         pendingIceCandidatesRef.current = [];
 
-        // FIX: AUTO-ANSWER immediately for reliability (esp. mobile/Safari)
-        // This ensures answer is created promptly after receiving offer
-        try {
-          await new Promise(r => requestAnimationFrame(r));
-
-          const answer = await peerConnection.createAnswer();
-          await peerConnection.setLocalDescription(answer);
-
-          console.log('[WebRTC] Auto-answering call');
-          if (!signalChannelRef.current) {
-            console.warn('[WebRTC] Signaling channel not ready for auto-answer');
-            return;
-          }
-          signalChannelRef.current.send({
-            type: 'broadcast',
-            event: 'answer',
-            payload: {
-              sdp: answer.sdp,
-              type: 'answer',
-              senderId: userId,
-            },
-          });
-
-          setState((prev) => ({
-            ...prev,
-            incomingCall: false,
-            isAnswering: false,
-          }));
-        } catch (answerError) {
-          console.error('[WebRTC] Failed to auto-answer:', answerError);
-          // Show incoming call UI if auto-answer fails, let user try manual answer
-          setState((prev) => ({
-            ...prev,
-            isAnswering: true,
-            incomingCall: true,
-            callerName: offerPayload.callerName || 'Caller',
-            connectionStatus: 'connecting',
-          }));
-        }
+        // STOP HERE. Do NOT getUserMedia, addTrack, createAnswer, or setLocalDescription.
+        // All of that happens in answerCall() when the user clicks Answer.
+        // Doing any of it here causes duplicate SDP negotiation → black screen.
+        setState((prev) => ({
+          ...prev,
+          incomingCall: true,
+          isAnswering: true,
+          callerName: offerPayload.callerName || 'Caller',
+          connectionStatus: 'connecting',
+        }));
       } catch (error) {
         console.error('[WebRTC] Error handling offer:', error);
         toast.error('Failed to receive call');
