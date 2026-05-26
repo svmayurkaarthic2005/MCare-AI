@@ -274,6 +274,11 @@ export const useWebRTCCall = (
   // Pass isInitiator to control transceiver creation
   const initializePeerConnection = useCallback(async (forInitiator: boolean = true) => {
     try {
+      // Prevent creating multiple peer connections
+      if (peerConnectionRef.current) {
+        console.log('[WebRTC] Reusing existing peerConnection');
+        return peerConnectionRef.current;
+      }
       const configuration = await getIceServers();
       console.log('[WebRTC] Creating peer connection with config:', configuration);
       const peerConnection = new RTCPeerConnection(configuration);
@@ -549,20 +554,30 @@ export const useWebRTCCall = (
           stream.getVideoTracks().forEach(t => { t.enabled = false; });
         }
 
-        // Add tracks to peer connection
-        stream.getTracks().forEach((track) => {
-          console.log('[WebRTC] Adding local track:', track.kind);
-          peerConnection.addTrack(track, stream);
-        });
+        // Add or replace tracks to peer connection (prefer replaceTrack to avoid duplicate senders)
+        for (const track of stream.getTracks()) {
+          try {
+            const kind = track.kind;
+            const existingSender = peerConnection.getSenders().find(s => s.track?.kind === kind);
+            if (existingSender && existingSender.replaceTrack) {
+              await existingSender.replaceTrack(track);
+              console.log('[WebRTC] Replaced existing sender track for', kind);
+            } else {
+              peerConnection.addTrack(track, stream);
+              console.log('[WebRTC] Added local track via addTrack:', kind);
+            }
+          } catch (err) {
+            console.warn('[WebRTC] Error adding/replacing local track:', err);
+            // Fallback to addTrack if replaceTrack fails
+            try { peerConnection.addTrack(track, stream); } catch (e) { console.error(e); }
+          }
+        }
       }
 
       // Create and send offer
-      const offer = await peerConnection.createOffer({
-        offerToReceiveAudio: true,
-        offerToReceiveVideo: true,
-      });
+      const offer = await peerConnection.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
       await peerConnection.setLocalDescription(offer);
-
+      console.log('[WebRTC] Offer created and setLocalDescription');
       console.log('[WebRTC] Sending offer');
       if (!signalChannelRef.current) {
         throw new Error('Signaling channel disconnected. Please try again.');
@@ -648,6 +663,7 @@ export const useWebRTCCall = (
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
 
+      console.log('[WebRTC] Answer created and setLocalDescription');
       console.log('[WebRTC] Sending answer');
       if (!signalChannelRef.current) {
         throw new Error('Signaling channel disconnected. Cannot send answer.');
@@ -694,10 +710,51 @@ export const useWebRTCCall = (
     // FIX: Use ref instead of state to avoid stale closure capturing old stream
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => {
-        track.stop();
-        console.log('[WebRTC] Stopped track:', track.kind);
+        try { track.stop(); } catch {}
+        console.log('[WebRTC] Stopped local track:', track.kind);
       });
       localStreamRef.current = null;
+    }
+
+    // Stop remote tracks if present to free media resources and avoid black screens
+    try {
+      setState((prev) => {
+        if (prev.remoteStream) {
+          try {
+            prev.remoteStream.getTracks().forEach((t) => { try { t.stop(); } catch {} });
+            console.log('[WebRTC] Stopped remote tracks');
+          } catch (e) {
+            console.warn('[WebRTC] Error stopping remote tracks', e);
+          }
+        }
+
+        return {
+          localStream: null,
+          remoteStream: null,
+          isCallActive: false,
+          isCalling: false,
+          isAnswering: false,
+          incomingCall: false,
+          callerName: null,
+          error: null,
+          connectionStatus: 'idle',
+          networkQuality: 'unknown',
+        };
+      });
+    } catch (e) {
+      console.warn('[WebRTC] Error resetting state during endCall', e);
+      setState({
+        localStream: null,
+        remoteStream: null,
+        isCallActive: false,
+        isCalling: false,
+        isAnswering: false,
+        incomingCall: false,
+        callerName: null,
+        error: null,
+        connectionStatus: 'idle',
+        networkQuality: 'unknown',
+      });
     }
 
     // Close peer connection
@@ -721,18 +778,7 @@ export const useWebRTCCall = (
       callTimeoutRef.current = null;
     }
 
-    setState({
-      localStream: null,
-      remoteStream: null,
-      isCallActive: false,
-      isCalling: false,
-      isAnswering: false,
-      incomingCall: false,
-      callerName: null,
-      error: null,
-      connectionStatus: 'idle',
-      networkQuality: 'unknown',
-    });
+    // state already reset above
 
     isInitiatorRef.current = false;
     reconnectAttemptRef.current = 0;
@@ -949,14 +995,25 @@ export const useWebRTCCall = (
             const transceivers = peerConnection.getTransceivers();
             console.log('[WebRTC] Answerer transceivers:', transceivers.length);
             
+            // Prefer replacing sender tracks where possible
             for (const transceiver of transceivers) {
-              const kind = transceiver.receiver?.track?.kind;
-              if (kind === 'audio' && audioTrack) {
-                await transceiver.sender.replaceTrack(audioTrack);
-                console.log('[WebRTC] Replaced audio track on transceiver');
-              } else if (kind === 'video' && videoTrack) {
-                await transceiver.sender.replaceTrack(videoTrack);
-                console.log('[WebRTC] Replaced video track on transceiver');
+              try {
+                // Use sender.kind as indicator where available
+                const senderKind = transceiver.sender?.track?.kind || transceiver.receiver?.track?.kind || transceiver.mid;
+                if (transceiver.sender && transceiver.sender.replaceTrack) {
+                  if (audioTrack && (transceiver.sender.track?.kind === 'audio' || !transceiver.sender.track)) {
+                    await transceiver.sender.replaceTrack(audioTrack);
+                    console.log('[WebRTC] Replaced audio track on transceiver');
+                    continue;
+                  }
+                  if (videoTrack && (transceiver.sender.track?.kind === 'video' || !transceiver.sender.track)) {
+                    await transceiver.sender.replaceTrack(videoTrack);
+                    console.log('[WebRTC] Replaced video track on transceiver');
+                    continue;
+                  }
+                }
+              } catch (e) {
+                console.warn('[WebRTC] replaceTrack failed on transceiver, will fallback to addTrack', e);
               }
             }
             
@@ -1079,6 +1136,7 @@ export const useWebRTCCall = (
 
         await peerConnection.setRemoteDescription(answer);
         console.log('[WebRTC] Set remote answer');
+        console.log('[WebRTC] Answer SDP length:', (answer.sdp || '').length);
 
         // Process buffered ICE candidates
         for (const candidate of pendingIceCandidatesRef.current) {
@@ -1106,6 +1164,12 @@ export const useWebRTCCall = (
           return;
         }
 
+        console.log('[WebRTC] ICE candidate received from remote:', {
+          candidate: candidatePayload.candidate?.slice?.(0, 120),
+          sdpMLineIndex: candidatePayload.sdpMLineIndex,
+          sdpMid: candidatePayload.sdpMid,
+        });
+
         const candidate = new RTCIceCandidate({
           candidate: candidatePayload.candidate,
           sdpMLineIndex: candidatePayload.sdpMLineIndex,
@@ -1114,6 +1178,7 @@ export const useWebRTCCall = (
 
         const peerConnection = peerConnectionRef.current;
         if (peerConnection?.remoteDescription) {
+          console.log('[WebRTC] Adding ICE candidate to peerConnection');
           await peerConnection.addIceCandidate(candidate);
         } else {
           console.log('[WebRTC] Buffering ICE candidate');
