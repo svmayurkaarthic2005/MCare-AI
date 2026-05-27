@@ -353,19 +353,15 @@ export const useWebRTCCall = (
         }
       };
 
-      // FIX: Use persistent remoteStreamRef — add tracks in place, never recreate the stream.
-      // Creating new MediaStream() on every ontrack event breaks video rendering on some browsers.
+      // Use persistent remoteStreamRef — add tracks in place, never recreate the stream.
       peerConnection.ontrack = (event) => {
         const track = event.track;
 
         console.log('[WebRTC] Remote track received:', {
-          kind: track.kind,
-          readyState: track.readyState,
-          muted: track.muted,
-          id: track.id,
+          kind: track.kind, readyState: track.readyState, muted: track.muted, id: track.id,
         });
 
-        // Prefer event.streams[0] if available (most browsers populate it)
+        // Add tracks to the persistent stream ref
         const sourceStream = event.streams?.[0];
         if (sourceStream) {
           sourceStream.getTracks().forEach(t => {
@@ -375,31 +371,30 @@ export const useWebRTCCall = (
             }
           });
         } else {
-          // Fallback: add the track directly
           if (!remoteStreamRef.current.getTracks().some(t => t.id === track.id)) {
             remoteStreamRef.current.addTrack(track);
             console.log('[WebRTC] Added remote track (fallback):', track.kind);
           }
         }
 
-        console.log('[WebRTC] Remote stream total tracks:', remoteStreamRef.current.getTracks().length);
-        console.log('[WebRTC] Remote stream track details:', remoteStreamRef.current.getTracks().map(t => ({
-          kind: t.kind, enabled: t.enabled, readyState: t.readyState, muted: t.muted,
+        console.log('[WebRTC] Remote stream tracks now:', remoteStreamRef.current.getTracks().map(t => ({
+          kind: t.kind, enabled: t.enabled, readyState: t.readyState,
         })));
 
-        // Update state with the stable persistent stream reference.
-        // VideoChat's useEffect checks video.srcObject !== remoteStream, so it only
-        // reassigns srcObject when the reference changes — passing the same ref object
-        // is intentional and avoids unnecessary video element resets.
-        setState((prev) => ({ ...prev, remoteStream: remoteStreamRef.current }));
+        // CRITICAL: React bails out when the same object reference is passed to setState.
+        // remoteStreamRef.current is always the same object, so we must force a new
+        // reference each time to guarantee the useEffect([remoteStream]) in VideoChat fires.
+        // We create a thin wrapper MediaStream from the same live tracks — no track copying.
+        const snapshot = new MediaStream(remoteStreamRef.current.getTracks());
+        setState((prev) => ({ ...prev, remoteStream: snapshot }));
 
         track.onmute   = () => console.log('[WebRTC] Remote track muted:',   track.kind);
         track.onunmute = () => console.log('[WebRTC] Remote track unmuted:', track.kind);
         track.onended  = () => {
           console.log('[WebRTC] Remote track ended:', track.kind);
           remoteStreamRef.current.removeTrack(track);
-          // Trigger re-render so UI can show "camera off" state
-          setState((prev) => ({ ...prev, remoteStream: remoteStreamRef.current }));
+          const updated = new MediaStream(remoteStreamRef.current.getTracks());
+          setState((prev) => ({ ...prev, remoteStream: updated }));
         };
       };
 
@@ -1019,7 +1014,9 @@ export const useWebRTCCall = (
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible' && peerConnectionRef.current?.connectionState === 'connected') {
         console.log('[WebRTC] Page visible — re-triggering remote stream for iOS audio recovery');
-        setState((prev) => ({ ...prev, remoteStream: remoteStreamRef.current }));
+        // Force new reference so VideoChat useEffect fires
+        const snapshot = new MediaStream(remoteStreamRef.current.getTracks());
+        setState((prev) => ({ ...prev, remoteStream: snapshot }));
       }
     };
     const handlePageShow = (e: PageTransitionEvent) => {

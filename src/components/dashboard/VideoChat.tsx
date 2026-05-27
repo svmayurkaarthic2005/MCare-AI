@@ -131,6 +131,7 @@ export const VideoChat = ({
   // ── Attach remote stream to all live remote video nodes ───────────────────
   // Explicitly set all required attributes on the element before calling play()
   // to handle Android Chrome / Samsung Internet autoplay policy.
+  // Also re-runs on isCallActive so the video attaches when connection is established.
   useEffect(() => {
     const refs = [normalRemoteRef, fsRemoteRef];
     refs.forEach(ref => {
@@ -151,9 +152,9 @@ export const VideoChat = ({
       video.playsInline = true;
       video.muted       = false; // MUST be false — remote audio must play
 
-      if (video.srcObject !== remoteStream) {
-        video.srcObject = remoteStream;
-      }
+      // Always reassign srcObject — the stream reference changes on every ontrack event
+      // (we create a new MediaStream wrapper each time to force React re-renders)
+      video.srcObject = remoteStream;
 
       const playPromise = video.play();
       if (playPromise !== undefined) {
@@ -165,7 +166,7 @@ export const VideoChat = ({
         });
       }
     });
-  }, [remoteStream, connectionStatus, isFullscreen]); // re-run when fullscreen mounts new node
+  }, [remoteStream, connectionStatus, isFullscreen, isCallActive]); // isCallActive re-attaches on connect
 
   // ── Force play on connected (iOS Safari user-gesture unlock) ──────────────
   useEffect(() => {
@@ -367,7 +368,7 @@ export const VideoChat = ({
         {!compact && <span className="hidden sm:inline">{videoEnabled ? 'Stop' : 'Start'}</span>}
       </Button>
 
-      {hasMultipleCameras && onSwitchCamera && (
+      {hasMultipleCameras && onSwitchCamera && userRole !== 'doctor' && (
         <Button
           onClick={onSwitchCamera}
           variant="outline"
