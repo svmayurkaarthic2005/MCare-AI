@@ -408,14 +408,22 @@ export const useWebRTCCall = (
             break;
           case 'connected':
             console.log('[WebRTC] ✅ Connection established successfully');
-            setState((prev) => ({
-              ...prev,
-              isCallActive: true,
-              connectionStatus: 'connected',
-              error: null,
-              isCalling: false,
-              isAnswering: false,
-            }));
+            // Force a new remoteStream snapshot so VideoChat's useEffect fires on connect
+            // even if tracks arrived before the 'connected' state change
+            {
+              const snapshot = remoteStreamRef.current.getTracks().length > 0
+                ? new MediaStream(remoteStreamRef.current.getTracks())
+                : null;
+              setState((prev) => ({
+                ...prev,
+                isCallActive: true,
+                connectionStatus: 'connected',
+                error: null,
+                isCalling: false,
+                isAnswering: false,
+                remoteStream: snapshot ?? prev.remoteStream,
+              }));
+            }
             reconnectAttemptRef.current = 0;
             startStatsMonitoring(peerConnection);
             break;
@@ -684,29 +692,38 @@ export const useWebRTCCall = (
     }
   }, [initializePeerConnection, getMediaStream, userRole, userId, appointmentId, remoteUserId]);
 
-  // Answer call (receiver).
-  // This owns the COMPLETE answerer flow:
-  //   getUserMedia → addTrack → createAnswer → setLocalDescription → send answer
-  // handleOffer only does setRemoteDescription + shows the incoming-call UI.
-  // Nothing else should touch SDP on the answerer side.
   const answerCall = useCallback(async (videoEnabled: boolean = true) => {
     try {
       setState((prev) => ({ ...prev, isAnswering: true, error: null, connectionStatus: 'connecting' }));
 
       const peerConnection = peerConnectionRef.current;
       if (!peerConnection) {
-        throw new Error('No incoming call to answer. Please wait for the call.');
+        // Offer hasn't arrived yet — wait up to 5s for it
+        console.warn('[WebRTC] answerCall: no peerConnection yet, waiting for offer...');
+        let waited = 0;
+        while (!peerConnectionRef.current && waited < 5000) {
+          await new Promise(r => setTimeout(r, 200));
+          waited += 200;
+        }
+        if (!peerConnectionRef.current) {
+          throw new Error('No incoming call to answer. Please wait for the call to connect.');
+        }
       }
 
-      // Guard against double-click: only answer when the remote offer is set and
-      // we haven't already started creating an answer (have-remote-offer is the only valid state).
-      if (peerConnection.signalingState !== 'have-remote-offer') {
-        console.warn('[WebRTC] answerCall called in wrong signalingState:', peerConnection.signalingState);
-        return;
+      const pc = peerConnectionRef.current!;
+
+      // Only valid to answer when remote offer is set
+      if ((pc.signalingState as string) !== 'have-remote-offer') {
+        console.warn('[WebRTC] answerCall: unexpected signalingState:', pc.signalingState, '— waiting briefly');
+        // Give handleOffer a moment to finish if it's still processing
+        await new Promise(r => setTimeout(r, 500));
+        if ((pc.signalingState as string) !== 'have-remote-offer') {
+          console.error('[WebRTC] answerCall: still wrong signalingState:', pc.signalingState);
+          setState((prev) => ({ ...prev, isAnswering: false }));
+          return;
+        }
       }
 
-      // Acquire media and add tracks now — this is the ONLY place addTrack is called
-      // for the answerer. handleOffer must NOT call addTrack.
       if (!videoEnabled) isVideoEnabledRef.current = false;
 
       try {
@@ -716,56 +733,45 @@ export const useWebRTCCall = (
           setState((prev) => ({ ...prev, localStream: stream }));
         }
 
-        // Apply video-enabled preference to the stream
         if (!videoEnabled) {
           localStreamRef.current.getVideoTracks().forEach(t => { t.enabled = false; });
         }
 
-        // Add each track only if it isn't already in a sender (guard against double-answer).
-        // Check by track.id rather than sender count — more precise, handles partial state.
+        // Add tracks — guard against double-add by checking existing senders
         const stream = localStreamRef.current;
         stream.getTracks().forEach(track => {
-          const alreadyAdded = peerConnection
-            .getSenders()
-            .some(sender => sender.track?.id === track.id);
+          const alreadyAdded = pc.getSenders().some(s => s.track?.id === track.id);
           if (!alreadyAdded) {
-            console.log('[WebRTC] answerCall addTrack:', track.kind);
-            peerConnection.addTrack(track, stream);
-          } else {
-            console.log('[WebRTC] answerCall: track already added, skipping:', track.kind);
+            console.log('[WebRTC] answerCall addTrack:', track.kind, track.enabled);
+            pc.addTrack(track, stream);
           }
         });
-        console.log('[WebRTC] Answerer tracks ready');
+        console.log('[WebRTC] Answerer tracks ready, senders:', pc.getSenders().length);
       } catch (mediaError) {
         console.error('[WebRTC] Failed to get media in answerCall:', mediaError);
-        const mediaErrorMsg = mediaError instanceof Error ? mediaError.message : 'Device error';
-        setState((prev) => ({ ...prev, isAnswering: false, error: mediaErrorMsg, connectionStatus: 'failed' }));
-        toast.error(`Cannot answer call: ${mediaErrorMsg}`);
+        const msg = mediaError instanceof Error ? mediaError.message : 'Device error';
+        setState((prev) => ({ ...prev, isAnswering: false, error: msg, connectionStatus: 'failed' }));
+        toast.error(`Cannot answer call: ${msg}`);
         if (signalChannelRef.current) {
           signalChannelRef.current.send({
-            type: 'broadcast',
-            event: 'call-end',
+            type: 'broadcast', event: 'call-end',
             payload: { senderId: userId, reason: 'media-unavailable' },
           });
         }
         return;
       }
 
-      const answer = await peerConnection.createAnswer();
-      await peerConnection.setLocalDescription(answer);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      console.log('[WebRTC] Answer created, signalingState:', pc.signalingState);
 
-      console.log('[WebRTC] Answer created and setLocalDescription');
       if (!signalChannelRef.current) {
         throw new Error('Signaling channel disconnected. Cannot send answer.');
       }
       signalChannelRef.current.send({
         type: 'broadcast',
         event: 'answer',
-        payload: {
-          sdp: peerConnection.localDescription!.sdp,
-          type: 'answer',
-          senderId: userId,
-        },
+        payload: { sdp: pc.localDescription!.sdp, type: 'answer', senderId: userId },
       });
       console.log('[WebRTC] Answer sent');
 
@@ -773,12 +779,7 @@ export const useWebRTCCall = (
     } catch (error) {
       console.error('[WebRTC] Error answering call:', error);
       const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-      setState((prev) => ({
-        ...prev,
-        isAnswering: false,
-        error: errorMsg,
-        connectionStatus: 'failed',
-      }));
+      setState((prev) => ({ ...prev, isAnswering: false, error: errorMsg, connectionStatus: 'failed' }));
       toast.error(errorMsg);
     }
   }, [userId, getMediaStream]);
@@ -1065,92 +1066,92 @@ export const useWebRTCCall = (
       });
 
       const handleOffer = async (payload: any) => {
-      const offerPayload = payload.payload;
-      
-      // Ignore our own messages
-      if (offerPayload.senderId === userId) {
-        console.log('[WebRTC] Ignoring own offer');
-        return;
-      }
+        const offerPayload = payload.payload;
 
-      console.log('[WebRTC] Received offer');
-
-      try {
-        // Handle glare: if we already have a local offer, use tie-breaking
-        let peerConnection = peerConnectionRef.current;
-        
-        if (peerConnection && peerConnection.signalingState === 'have-local-offer') {
-          // Glare condition: both sides sent offers
-          // FIX #4 (GLARE): Use role-based tie-breaking instead of UUID comparison
-          // Doctor is "impolite" (takes priority), Patient is "polite" (yields)
-          const isDoctor = userRole === 'doctor';
-          const remoteIsDoctor = offerPayload.callerRole === 'doctor';
-          const shouldYield = !isDoctor && remoteIsDoctor;
-          
-          if (shouldYield) {
-            console.log('[WebRTC] Glare detected, patient yielding (rolling back)');
-            await peerConnection.setLocalDescription({ type: 'rollback' });
-          } else {
-            console.log('[WebRTC] Glare detected, doctor takes priority (ignoring remote offer)');
-            return;
-          }
-        }
-
-        // Create new peer connection if needed (as answerer - no transceivers)
-        if (!peerConnection) {
-          peerConnection = await initializePeerConnection(false);
-        }
-
-        const offer = new RTCSessionDescription({
-          type: 'offer',
-          sdp: offerPayload.sdp,
-        });
-
-        await peerConnection.setRemoteDescription(offer);
-        console.log('[WebRTC] Set remote offer — waiting for user to answer');
-
-        // Process any ICE candidates that arrived before the remote description was set.
-        for (const candidate of pendingIceCandidatesRef.current) {
-          try {
-            await peerConnection.addIceCandidate(candidate);
-          } catch (err) {
-            console.error('[WebRTC] Error adding buffered ICE:', err);
-          }
-        }
-        pendingIceCandidatesRef.current = [];
-
-        // ICE restart offers come from the remote peer during reconnect.
-        // They must NOT trigger the incoming-call UI — the call is already active.
-        if (offerPayload.iceRestart) {
-          console.log('[WebRTC] ICE restart offer — skipping incoming-call UI, creating answer immediately');
-          // For ICE restart we answer immediately (no user interaction needed)
-          const answer = await peerConnection.createAnswer();
-          await peerConnection.setLocalDescription(answer);
-          if (signalChannelRef.current) {
-            signalChannelRef.current.send({
-              type: 'broadcast',
-              event: 'answer',
-              payload: { sdp: peerConnection.localDescription!.sdp, type: 'answer', senderId: userId },
-            });
-          }
+        // Ignore our own messages
+        if (offerPayload.senderId === userId) {
+          console.log('[WebRTC] Ignoring own offer');
           return;
         }
 
-        // STOP HERE for normal offers. Do NOT getUserMedia, addTrack, createAnswer, or setLocalDescription.
-        // All of that happens in answerCall() when the user clicks Answer.
-        // Doing any of it here causes duplicate SDP negotiation → black screen.
-        setState((prev) => ({
-          ...prev,
-          incomingCall: true,
-          isAnswering: true,
-          callerName: offerPayload.callerName || 'Caller',
-          connectionStatus: 'connecting',
-        }));
-      } catch (error) {
-        console.error('[WebRTC] Error handling offer:', error);
-        toast.error('Failed to receive call');
-      }
-    };
+        console.log('[WebRTC] Received offer, iceRestart:', !!offerPayload.iceRestart);
+
+        try {
+          let peerConnection = peerConnectionRef.current;
+
+          // ── Glare: both sides sent an offer simultaneously ──────────────────
+          if (peerConnection && peerConnection.signalingState === 'have-local-offer') {
+            const isDoctor = userRole === 'doctor';
+            const remoteIsDoctor = offerPayload.callerRole === 'doctor';
+            const shouldYield = !isDoctor && remoteIsDoctor;
+
+            if (shouldYield) {
+              console.log('[WebRTC] Glare — patient yielding (rolling back local offer)');
+              await peerConnection.setLocalDescription({ type: 'rollback' });
+              // Fall through to handle the remote offer below
+            } else {
+              console.log('[WebRTC] Glare — doctor takes priority, ignoring remote offer');
+              return;
+            }
+          }
+
+          // ── ICE restart offer: PC already exists, just re-negotiate ─────────
+          if (offerPayload.iceRestart && peerConnection) {
+            console.log('[WebRTC] ICE restart offer — answering immediately');
+            const offer = new RTCSessionDescription({ type: 'offer', sdp: offerPayload.sdp });
+            await peerConnection.setRemoteDescription(offer);
+            const answer = await peerConnection.createAnswer();
+            await peerConnection.setLocalDescription(answer);
+            if (signalChannelRef.current) {
+              signalChannelRef.current.send({
+                type: 'broadcast',
+                event: 'answer',
+                payload: { sdp: peerConnection.localDescription!.sdp, type: 'answer', senderId: userId },
+              });
+            }
+            return;
+          }
+
+          // ── Duplicate offer guard: if we already have remote description set,
+          //    ignore the re-sent offer (channel-ready triggered a re-send but we
+          //    already processed the first one) ─────────────────────────────────
+          if (
+            peerConnection &&
+            ((peerConnection.signalingState as string) === 'have-remote-offer' ||
+              peerConnection.signalingState === 'stable')
+          ) {
+            console.log('[WebRTC] Offer already processed (signalingState:', peerConnection.signalingState, ') — ignoring duplicate');
+            return;
+          }
+
+          // ── Fresh offer: create new PC as answerer ───────────────────────────
+          if (!peerConnection) {
+            peerConnection = await initializePeerConnection(false);
+          }
+
+          const offer = new RTCSessionDescription({ type: 'offer', sdp: offerPayload.sdp });
+          await peerConnection.setRemoteDescription(offer);
+          console.log('[WebRTC] Set remote offer — signalingState:', peerConnection.signalingState);
+
+          // Drain any ICE candidates that arrived before remote description was set
+          for (const candidate of pendingIceCandidatesRef.current) {
+            try { await peerConnection.addIceCandidate(candidate); } catch {}
+          }
+          pendingIceCandidatesRef.current = [];
+
+          // Show incoming call UI — answerCall() handles getUserMedia + addTrack + createAnswer
+          setState((prev) => ({
+            ...prev,
+            incomingCall: true,
+            isAnswering: true,
+            callerName: offerPayload.callerName || 'Caller',
+            connectionStatus: 'connecting',
+          }));
+        } catch (error) {
+          console.error('[WebRTC] Error handling offer:', error);
+          toast.error('Failed to receive call');
+        }
+      };
 
     const handleAnswer = async (payload: any) => {
       const answerPayload = payload.payload;
