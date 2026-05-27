@@ -118,7 +118,7 @@ export const VideoChat = ({
     }
   }, [connectionStatus, isCalling, isAnswering]);
 
-  // ── Attach local stream to all live local video nodes (issue 1) ───────────
+  // ── Attach local stream to all live local video nodes ────────────────────
   useEffect(() => {
     const refs = [normalLocalRef, fsLocalRef];
     refs.forEach(ref => {
@@ -128,7 +128,9 @@ export const VideoChat = ({
     });
   }, [localStream, isFullscreen]); // re-run when fullscreen mounts new node
 
-  // ── Attach remote stream to all live remote video nodes (issue 1) ─────────
+  // ── Attach remote stream to all live remote video nodes ───────────────────
+  // Explicitly set all required attributes on the element before calling play()
+  // to handle Android Chrome / Samsung Internet autoplay policy.
   useEffect(() => {
     const refs = [normalRemoteRef, fsRemoteRef];
     refs.forEach(ref => {
@@ -140,10 +142,28 @@ export const VideoChat = ({
         return;
       }
 
+      console.log('[VideoChat] Attaching remote stream, tracks:', remoteStream.getTracks().map(t => ({
+        kind: t.kind, enabled: t.enabled, readyState: t.readyState,
+      })));
+
+      // Always set these imperatively — JSX attributes can be overridden by browser
+      video.autoplay    = true;
+      video.playsInline = true;
+      video.muted       = false; // MUST be false — remote audio must play
+
       if (video.srcObject !== remoteStream) {
         video.srcObject = remoteStream;
       }
-      attachStream(video, remoteStream);
+
+      const playPromise = video.play();
+      if (playPromise !== undefined) {
+        playPromise.catch((err: unknown) => {
+          const e = err as { name?: string };
+          if (e.name === 'AbortError') return;
+          console.warn('[VideoChat] Remote video play() failed, retrying:', e.name);
+          setTimeout(() => video.play().catch(() => {}), 500);
+        });
+      }
     });
   }, [remoteStream, connectionStatus, isFullscreen]); // re-run when fullscreen mounts new node
 
@@ -240,13 +260,17 @@ export const VideoChat = ({
     compact = false
   ) => (
     <>
-      {/* Remote video */}
+      {/* Remote video — NEVER muted, autoplay required */}
       <video
         ref={remoteRef}
         autoPlay playsInline
         disablePictureInPicture
         className={cn('absolute inset-0 w-full h-full object-cover', !remoteStream && 'hidden')}
-        onLoadedMetadata={(e) => attachStream(e.currentTarget, remoteStream!)}
+        onLoadedMetadata={(e) => {
+          const v = e.currentTarget;
+          v.muted = false;
+          v.play().catch(() => setTimeout(() => v.play().catch(() => {}), 300));
+        }}
       />
 
       {/* Placeholder when no remote stream */}

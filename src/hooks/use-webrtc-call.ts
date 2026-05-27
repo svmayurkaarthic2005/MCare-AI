@@ -383,6 +383,9 @@ export const useWebRTCCall = (
         }
 
         console.log('[WebRTC] Remote stream total tracks:', remoteStreamRef.current.getTracks().length);
+        console.log('[WebRTC] Remote stream track details:', remoteStreamRef.current.getTracks().map(t => ({
+          kind: t.kind, enabled: t.enabled, readyState: t.readyState, muted: t.muted,
+        })));
 
         // Update state with the stable persistent stream reference.
         // VideoChat's useEffect checks video.srcObject !== remoteStream, so it only
@@ -934,60 +937,70 @@ export const useWebRTCCall = (
     console.log('[WebRTC] Video', enabled ? 'enabled' : 'disabled');
   }, []);
 
-  // Switch camera (mobile)
-  // FIX 4: Preserve mute state after replaceTrack
-  // FIX: Use localStreamRef instead of state.localStream to avoid stale closure
   const switchCamera = useCallback(async () => {
     if (!localStreamRef.current) return;
 
-    try {
-      const newFacingMode = currentFacingModeRef.current === 'user' ? 'environment' : 'user';
+    const newFacingMode = currentFacingModeRef.current === 'user' ? 'environment' : 'user';
 
-      // Get new stream FIRST — if this fails, the old camera is still alive.
-      // Stopping the old track before acquiring the new one risks a permanently dead camera on iOS Safari.
-      const newStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: newFacingMode },
-        audio: false,
-      });
+    try {
+      const pc = peerConnectionRef.current;
+
+      // Acquire new camera FIRST — if this fails the old camera is still alive
+      let newStream: MediaStream;
+      try {
+        newStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: newFacingMode }, width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: false,
+        });
+      } catch {
+        // Fallback: exact facingMode (some Android devices need this)
+        newStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { exact: newFacingMode } },
+          audio: false,
+        });
+      }
 
       const newVideoTrack = newStream.getVideoTracks()[0];
+      if (!newVideoTrack) throw new Error('No video track in new stream');
 
-      // Stop any other tracks from the temporary stream — only the video track is needed
+      // Stop any extra tracks from the temp stream
       newStream.getTracks().forEach(t => { if (t !== newVideoTrack) t.stop(); });
 
-      // Now safe to stop the old video track
-      localStreamRef.current.getVideoTracks().forEach((track) => track.stop());
-
-      currentFacingModeRef.current = newFacingMode;
-
-      // Replace track in peer connection
-      const pc = peerConnectionRef.current;
+      // Replace outgoing track in peer connection
       if (pc) {
-        const sender = pc.getSenders().find((s) => s.track?.kind === 'video');
+        const sender = pc.getSenders().find(s => s.track?.kind === 'video');
         if (sender) {
           await sender.replaceTrack(newVideoTrack);
-          
-          // FIX 4: Restore mute state on new track
-          // FIX (PERSISTENT MUTE): Use ref value instead of local variable
           newVideoTrack.enabled = isVideoEnabledRef.current;
-          if (!isVideoEnabledRef.current) {
-            console.log('[WebRTC] Video mute state preserved after camera switch');
-          }
+          console.log('[WebRTC] Camera switched, track replaced');
         }
       }
 
-      // Update local stream using ref for current audio track
-      const currentAudioTrack = localStreamRef.current.getAudioTracks()[0];
+      // NOW stop the old video track (after replaceTrack succeeds)
+      localStreamRef.current.getVideoTracks().forEach(t => { try { t.stop(); } catch {} });
+
+      currentFacingModeRef.current = newFacingMode;
+
+      // Build updated stream with existing audio + new video
+      const audioTracks = localStreamRef.current.getAudioTracks();
       const updatedStream = new MediaStream();
-      if (currentAudioTrack) updatedStream.addTrack(currentAudioTrack);
+      audioTracks.forEach(t => updatedStream.addTrack(t));
       updatedStream.addTrack(newVideoTrack);
 
       localStreamRef.current = updatedStream;
-      setState((prev) => ({ ...prev, localStream: updatedStream }));
+      setState(prev => ({ ...prev, localStream: updatedStream }));
+
+      // Force local preview to refresh on Android (srcObject change alone may not trigger play)
+      setTimeout(() => {
+        document.querySelectorAll<HTMLVideoElement>('video').forEach(v => {
+          if (v.srcObject === updatedStream) v.play().catch(() => {});
+        });
+      }, 200);
+
       toast.success(`Switched to ${newFacingMode === 'user' ? 'front' : 'back'} camera`);
     } catch (error) {
       console.error('[WebRTC] Error switching camera:', error);
-      toast.error('Could not switch camera');
+      toast.error('Could not switch camera. Some mobile browsers allow only one camera session.');
     }
   }, []);
 
