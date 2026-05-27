@@ -9,7 +9,7 @@ import { AppointmentFeedbackDialog } from "./AppointmentFeedbackDialog";
 import { VideoChatDialog } from "./VideoChatDialog";
 import { PrescriptionUploadDialog } from "./PrescriptionUploadDialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { hasAppointmentPassed, canStartVideoCall } from "@/lib/istTimezone";
+import { hasAppointmentPassed } from "@/lib/istTimezone";
 import { useCallListener } from "@/hooks/use-call-listener";
 
 interface Appointment {
@@ -511,9 +511,8 @@ export const DoctorAppointmentHistory = ({
                       </p>
                     )}
 
-                    {/* Start Call button — within call window */}
+                    {/* Start Call button — show for all approved online appointments */}
                     {appointment.status === "approved" &&
-                      canStartVideoCall(appointment.appointment_date) &&
                       (!appointment.consultation_type || appointment.consultation_type === "online") && (
                         <div className="pt-1 sm:pt-1.5">
                           <Button

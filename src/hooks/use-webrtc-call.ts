@@ -560,10 +560,10 @@ export const useWebRTCCall = (
     try {
       setState((prev) => ({ ...prev, isCalling: true, error: null, connectionStatus: 'connecting' }));
 
-      // Wait for signaling channel
+      // Wait for signaling channel to be ready
       console.log('[WebRTC] Waiting for signaling channel...');
       let retries = 0;
-      const maxRetries = 5;
+      const maxRetries = 10;
 
       while (retries < maxRetries && !signalChannelRef.current) {
         try {
@@ -582,84 +582,97 @@ export const useWebRTCCall = (
         throw new Error('Could not connect to signaling server. Check your internet connection.');
       }
 
-      // Initialize peer connection first (as initiator)
+      // Initialize peer connection (as initiator)
       const peerConnection = await initializePeerConnection(true);
 
-      // CRITICAL: Always add tracks to the peer connection.
-      // The PC is freshly created (initializePeerConnection closes the old one),
-      // so it has no senders yet regardless of whether localStreamRef exists.
       if (!localStreamRef.current) {
         const stream = await getMediaStream(videoEnabled);
         localStreamRef.current = stream;
         setState((prev) => ({ ...prev, localStream: stream }));
-
-        // Apply initial video enabled state
         if (!videoEnabled) {
           isVideoEnabledRef.current = false;
           stream.getVideoTracks().forEach(t => { t.enabled = false; });
         }
       }
 
-      // Add tracks from the (possibly pre-existing) stream to the fresh PC
       const streamToAdd = localStreamRef.current!;
       streamToAdd.getTracks().forEach((track) => {
-        console.log('[WebRTC] Adding local track:', track.kind);
+        console.log('[WebRTC] Adding local track:', track.kind, track.enabled);
         peerConnection.addTrack(track, streamToAdd);
       });
 
-      // Create and send offer
-      const offer = await peerConnection.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
-      await peerConnection.setLocalDescription(offer);
-      console.log('[WebRTC] Offer created and setLocalDescription');
-      console.log('[WebRTC] Sending offer');
-      if (!signalChannelRef.current) {
-        throw new Error('Signaling channel disconnected. Please try again.');
-      }
-      signalChannelRef.current.send({
-        type: 'broadcast',
-        event: 'offer',
-        payload: {
-          sdp: peerConnection.localDescription!.sdp,
-          type: 'offer',
-          callerName: userRole === 'doctor' ? 'Doctor' : 'Patient',
-          callerRole: userRole,
-          senderId: userId,
-        },
-      });
+      const sendOffer = async () => {
+        if (!signalChannelRef.current) return;
+        const offer = await peerConnection.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
+        await peerConnection.setLocalDescription(offer);
+        console.log('[WebRTC] Sending offer, signalingState:', peerConnection.signalingState);
+        signalChannelRef.current.send({
+          type: 'broadcast',
+          event: 'offer',
+          payload: {
+            sdp: peerConnection.localDescription!.sdp,
+            type: 'offer',
+            callerName: userRole === 'doctor' ? 'Doctor' : 'Patient',
+            callerRole: userRole,
+            senderId: userId,
+          },
+        });
+      };
 
-      // Also notify the remote user's global listener channel so their UI wakes up
-      // even if they haven't opened the call dialog yet.
-      // This is the "ring the doorbell" signal — separate from the WebRTC offer.
+      await sendOffer();
+
+      // Notify the remote user's global listener channel so their UI wakes up.
+      // Also listen for a 'channel-ready' signal from the remote side — if they
+      // open their dialog after we sent the offer, we re-send so they don't miss it.
       if (remoteUserId) {
         const notifyChannel = supabase.channel(`video-call-doctor-${remoteUserId}`);
-        notifyChannel.subscribe((status) => {
-          if (status === 'SUBSCRIBED') {
-            notifyChannel.send({
-              type: 'broadcast',
-              event: 'incoming-call',
-              payload: {
-                appointmentId,
-                callerName: userRole === 'doctor' ? 'Doctor' : 'Patient',
-                callerRole: userRole,
-                senderId: userId,
-              },
-            });
-            // Unsubscribe after sending — this is fire-and-forget
-            setTimeout(() => supabase.removeChannel(notifyChannel), 2000);
-          }
-        });
+        notifyChannel
+          .on('broadcast', { event: 'channel-ready' }, async (payload: any) => {
+            // Remote side just subscribed — re-send offer so they don't miss it
+            if (payload.payload?.senderId === userId) return;
+            if (peerConnection.signalingState === 'have-local-offer') {
+              console.log('[WebRTC] Remote channel ready — re-sending offer');
+              if (signalChannelRef.current) {
+                signalChannelRef.current.send({
+                  type: 'broadcast',
+                  event: 'offer',
+                  payload: {
+                    sdp: peerConnection.localDescription!.sdp,
+                    type: 'offer',
+                    callerName: userRole === 'doctor' ? 'Doctor' : 'Patient',
+                    callerRole: userRole,
+                    senderId: userId,
+                  },
+                });
+              }
+            }
+          })
+          .subscribe((status) => {
+            if (status === 'SUBSCRIBED') {
+              notifyChannel.send({
+                type: 'broadcast',
+                event: 'incoming-call',
+                payload: {
+                  appointmentId,
+                  callerName: userRole === 'doctor' ? 'Doctor' : 'Patient',
+                  callerRole: userRole,
+                  senderId: userId,
+                },
+              });
+              // Keep this channel alive for the duration of the call to catch channel-ready
+              // Clean up after 90s (well past the 60s call timeout)
+              setTimeout(() => supabase.removeChannel(notifyChannel), 90000);
+            }
+          });
       }
 
-      // Set timeout for answer (60s to account for poor networks)
-      // FIX #4 (STUCK CALL): Increased from 45s to 60s, added logging
       if (callTimeoutRef.current) clearTimeout(callTimeoutRef.current);
       callTimeoutRef.current = setTimeout(() => {
-        // Check actual peer connection state — React state may lag behind
         const pcState = peerConnectionRef.current?.connectionState;
-        if (pcState === 'connected') return; // already connected, ignore
+        if (pcState === 'connected') return;
         setState((prev) => {
           if (prev.isCalling && !prev.isCallActive) {
-            console.warn('[WebRTC] Call timeout - no connection established within 60s');
+            console.warn('[WebRTC] Call timeout - no answer within 60s');
             toast.error('Call not answered. The other person may not have the call dialog open.');
             return { ...prev, isCalling: false, error: 'Call not answered', connectionStatus: 'idle' };
           }
@@ -671,15 +684,10 @@ export const useWebRTCCall = (
     } catch (error) {
       console.error('[WebRTC] Error starting call:', error);
       const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-      setState((prev) => ({
-        ...prev,
-        isCalling: false,
-        error: errorMsg,
-        connectionStatus: 'failed',
-      }));
+      setState((prev) => ({ ...prev, isCalling: false, error: errorMsg, connectionStatus: 'failed' }));
       toast.error(errorMsg);
     }
-  }, [initializePeerConnection, getMediaStream, userRole, userId]);
+  }, [initializePeerConnection, getMediaStream, userRole, userId, appointmentId, remoteUserId]);
 
   // Answer call (receiver).
   // This owns the COMPLETE answerer flow:
@@ -1244,6 +1252,13 @@ export const useWebRTCCall = (
         console.log('[WebRTC] Channel status:', status);
         if (status === 'SUBSCRIBED') {
           signalChannelRef.current = channel;
+          // Broadcast channel-ready so the caller can re-send the offer if they
+          // sent it before we subscribed (race condition: doctor opens dialog late)
+          channel.send({
+            type: 'broadcast',
+            event: 'channel-ready',
+            payload: { senderId: userId },
+          });
           setTimeout(() => {
             resolveChannelReadyRef.current?.();
             resolveChannelReadyRef.current = null;
