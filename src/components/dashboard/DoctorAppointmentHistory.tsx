@@ -85,19 +85,10 @@ export const DoctorAppointmentHistory = ({
   const fetchFeedbacksRef = useRef<() => void>(() => {});
   const fetchPrescriptionsRef = useRef<() => void>(() => {});
 
-  // ── Approved online appointment IDs for the call listener ─────────────────
-  const onlineAppointmentIds = appointments
-    .filter(
-      (apt) =>
-        apt.status === "approved" &&
-        (!apt.consultation_type || apt.consultation_type === "online")
-    )
-    .map((apt) => apt.id);
-
-  // ── Lightweight call listener — one Supabase channel per appointment ───────
-  // No RTCPeerConnection created here. Only surfaces incoming offer events.
+  // ── Lightweight call listener — ONE global channel for this doctor ────────
+  // Listens on video-call-doctor-${doctorId}. Patient sends an "incoming-call"
+  // broadcast there when they initiate a call, waking up the doctor UI.
   const { incomingCall, dismissIncoming } = useCallListener(
-    onlineAppointmentIds,
     doctorId,
     activeVideoAppointment?.id ?? null
   );

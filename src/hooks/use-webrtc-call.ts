@@ -624,6 +624,29 @@ export const useWebRTCCall = (
         },
       });
 
+      // Also notify the remote user's global listener channel so their UI wakes up
+      // even if they haven't opened the call dialog yet.
+      // This is the "ring the doorbell" signal — separate from the WebRTC offer.
+      if (remoteUserId) {
+        const notifyChannel = supabase.channel(`video-call-doctor-${remoteUserId}`);
+        notifyChannel.subscribe((status) => {
+          if (status === 'SUBSCRIBED') {
+            notifyChannel.send({
+              type: 'broadcast',
+              event: 'incoming-call',
+              payload: {
+                appointmentId,
+                callerName: userRole === 'doctor' ? 'Doctor' : 'Patient',
+                callerRole: userRole,
+                senderId: userId,
+              },
+            });
+            // Unsubscribe after sending — this is fire-and-forget
+            setTimeout(() => supabase.removeChannel(notifyChannel), 2000);
+          }
+        });
+      }
+
       // Set timeout for answer (60s to account for poor networks)
       // FIX #4 (STUCK CALL): Increased from 45s to 60s, added logging
       if (callTimeoutRef.current) clearTimeout(callTimeoutRef.current);
