@@ -93,14 +93,18 @@ export const useWebRTCCall = (
   const resolveChannelReadyRef = useRef<(() => void) | null>(null);
   const isEndingCallRef = useRef<boolean>(false);
   const pendingIceCandidatesRef = useRef<RTCIceCandidate[]>([]);
-  const isInitiatorRef = useRef<boolean>(false);
   const reconnectAttemptRef = useRef<number>(0);
   const statsIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const currentFacingModeRef = useRef<'user' | 'environment'>('user');
   const localStreamRef = useRef<MediaStream | null>(null);
-  const lastOfferRef = useRef<RTCSessionDescription | null>(null);
-  // FIX #3: Guard to prevent multiple concurrent ICE restart timers
+  // Guard to prevent multiple concurrent ICE restart timers
   const iceRestartInProgressRef = useRef<boolean>(false);
+  // Stored timeout ID for ICE restart guard — cleared on unmount to prevent post-unmount state updates
+  const iceRestartTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  // Ref for the channel reconnect delay timer — cleared on unmount
+  const channelReconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  // Ref to the currently active Supabase channel — used for reconnect cleanup
+  const activeChannelRef = useRef<any>(null);
   // FIX (PERSISTENT MUTE): Track audio/video mute state across reconnects/replaceTrack
   const isAudioEnabledRef = useRef<boolean>(true);
   const isVideoEnabledRef = useRef<boolean>(true);
@@ -130,6 +134,12 @@ export const useWebRTCCall = (
       },
       {
         urls: 'turn:global.relay.metered.ca:80?transport=udp',
+        username: meteredUsername,
+        credential: meteredCredential,
+      },
+      // Enterprise firewall fallback (port 5349 = TURNS over TLS)
+      {
+        urls: 'turns:global.relay.metered.ca:5349?transport=tcp',
         username: meteredUsername,
         credential: meteredCredential,
       },
@@ -194,6 +204,8 @@ export const useWebRTCCall = (
     }
 
     statsIntervalRef.current = setInterval(async () => {
+      // Guard: skip if PC was closed without clearing the interval
+      if (pc.connectionState === 'closed') return;
       try {
         const stats = await pc.getStats();
         let packetsLost = 0;
@@ -247,7 +259,6 @@ export const useWebRTCCall = (
       
       const offer = await peerConnection.createOffer({ iceRestart: true });
       await peerConnection.setLocalDescription(offer);
-      lastOfferRef.current = peerConnection.localDescription;
       
       if (!signalChannelRef.current) {
         console.warn('[WebRTC] Signaling channel not ready for ICE restart offer');
@@ -268,9 +279,10 @@ export const useWebRTCCall = (
     } catch (error) {
       console.error('[WebRTC] ICE restart failed:', error);
     } finally {
-      // FIX #3: Clear guard after 5s to allow next attempt
-      setTimeout(() => {
+      // Clear guard after 5s to allow next attempt — stored in ref so it can be cancelled on unmount
+      iceRestartTimeoutRef.current = setTimeout(() => {
         iceRestartInProgressRef.current = false;
+        iceRestartTimeoutRef.current = null;
       }, 5000);
     }
   }, [userRole, userId]);
@@ -372,17 +384,20 @@ export const useWebRTCCall = (
 
         console.log('[WebRTC] Remote stream total tracks:', remoteStreamRef.current.getTracks().length);
 
-        // Give React a new MediaStream wrapper so it detects a state change and re-renders.
-        // The underlying tracks are the same live objects — only the wrapper is new.
-        // This is safe: VideoChat's useEffect checks `video.srcObject !== remoteStream`
-        // so it only reassigns srcObject when the reference changes, which is what we want.
-        setState((prev) => ({
-          ...prev,
-          remoteStream: new MediaStream(remoteStreamRef.current.getTracks()),
-        }));
+        // Update state with the stable persistent stream reference.
+        // VideoChat's useEffect checks video.srcObject !== remoteStream, so it only
+        // reassigns srcObject when the reference changes — passing the same ref object
+        // is intentional and avoids unnecessary video element resets.
+        setState((prev) => ({ ...prev, remoteStream: remoteStreamRef.current }));
 
         track.onmute   = () => console.log('[WebRTC] Remote track muted:',   track.kind);
         track.onunmute = () => console.log('[WebRTC] Remote track unmuted:', track.kind);
+        track.onended  = () => {
+          console.log('[WebRTC] Remote track ended:', track.kind);
+          remoteStreamRef.current.removeTrack(track);
+          // Trigger re-render so UI can show "camera off" state
+          setState((prev) => ({ ...prev, remoteStream: remoteStreamRef.current }));
+        };
       };
 
       peerConnection.onconnectionstatechange = () => {
@@ -413,12 +428,16 @@ export const useWebRTCCall = (
               connectionStatus: 'reconnecting',
               error: 'Connection interrupted. Reconnecting...',
             }));
-            // Wait 5-10s before ICE restart (mobile networks flap frequently)
+            // Wait 8s before ICE restart — mobile networks flap frequently.
+            // Guard: verify this PC is still the active one before restarting.
             setTimeout(() => {
-              if (peerConnection.connectionState === 'disconnected' && reconnectAttemptRef.current < 3) {
-                reconnectAttemptRef.current++;
-                attemptIceRestart(peerConnection);
-              }
+              if (
+                peerConnection !== peerConnectionRef.current ||
+                peerConnection.connectionState !== 'disconnected' ||
+                reconnectAttemptRef.current >= 3
+              ) return;
+              reconnectAttemptRef.current++;
+              attemptIceRestart(peerConnection);
             }, 8000);
             break;
           case 'failed':
@@ -537,7 +556,6 @@ export const useWebRTCCall = (
   const startCall = useCallback(async (videoEnabled: boolean = true) => {
     try {
       setState((prev) => ({ ...prev, isCalling: true, error: null, connectionStatus: 'connecting' }));
-      isInitiatorRef.current = true;
 
       // Wait for signaling channel
       console.log('[WebRTC] Waiting for signaling channel...');
@@ -594,7 +612,6 @@ export const useWebRTCCall = (
       if (!signalChannelRef.current) {
         throw new Error('Signaling channel disconnected. Please try again.');
       }
-      lastOfferRef.current = peerConnection.localDescription;
       signalChannelRef.current.send({
         type: 'broadcast',
         event: 'offer',
@@ -611,6 +628,9 @@ export const useWebRTCCall = (
       // FIX #4 (STUCK CALL): Increased from 45s to 60s, added logging
       if (callTimeoutRef.current) clearTimeout(callTimeoutRef.current);
       callTimeoutRef.current = setTimeout(() => {
+        // Check actual peer connection state — React state may lag behind
+        const pcState = peerConnectionRef.current?.connectionState;
+        if (pcState === 'connected') return; // already connected, ignore
         setState((prev) => {
           if (prev.isCalling && !prev.isCallActive) {
             console.warn('[WebRTC] Call timeout - no connection established within 60s');
@@ -643,11 +663,17 @@ export const useWebRTCCall = (
   const answerCall = useCallback(async (videoEnabled: boolean = true) => {
     try {
       setState((prev) => ({ ...prev, isAnswering: true, error: null, connectionStatus: 'connecting' }));
-      isInitiatorRef.current = false;
 
       const peerConnection = peerConnectionRef.current;
       if (!peerConnection) {
         throw new Error('No incoming call to answer. Please wait for the call.');
+      }
+
+      // Guard against double-click: only answer when the remote offer is set and
+      // we haven't already started creating an answer (have-remote-offer is the only valid state).
+      if (peerConnection.signalingState !== 'have-remote-offer') {
+        console.warn('[WebRTC] answerCall called in wrong signalingState:', peerConnection.signalingState);
+        return;
       }
 
       // Acquire media and add tracks now — this is the ONLY place addTrack is called
@@ -742,7 +768,16 @@ export const useWebRTCCall = (
       statsIntervalRef.current = null;
     }
 
-    // FIX: Use ref instead of state to avoid stale closure capturing old stream
+    // Detach all senders before stopping tracks.
+    // replaceTrack(null) signals to the remote peer that tracks are gone cleanly,
+    // prevents ghost camera indicators on Safari, and avoids frozen senders.
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.getSenders().forEach(sender => {
+        try { sender.replaceTrack(null); } catch {}
+      });
+    }
+
+    // Stop local tracks (camera/mic hardware release)
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => {
         try { track.stop(); } catch {}
@@ -791,7 +826,6 @@ export const useWebRTCCall = (
       callTimeoutRef.current = null;
     }
 
-    isInitiatorRef.current = false;
     reconnectAttemptRef.current = 0;
     // FIX: Reset camera state to front-facing for next call
     currentFacingModeRef.current = 'user';
@@ -802,6 +836,14 @@ export const useWebRTCCall = (
     pendingIceCandidatesRef.current = [];
     // Clear ICE restart guard so next call can restart ICE immediately if needed
     iceRestartInProgressRef.current = false;
+    if (iceRestartTimeoutRef.current) {
+      clearTimeout(iceRestartTimeoutRef.current);
+      iceRestartTimeoutRef.current = null;
+    }
+    if (channelReconnectTimerRef.current) {
+      clearTimeout(channelReconnectTimerRef.current);
+      channelReconnectTimerRef.current = null;
+    }
     toast.success('Call ended');
 
     setTimeout(() => {
@@ -813,52 +855,60 @@ export const useWebRTCCall = (
   // always call the latest version without stale closures
   endCallRef.current = endCall;
 
-  // FIX: Clean up stats interval on component unmount (endCall may not be called)
+  // Clean up intervals/timeouts on component unmount (endCall may not be called)
   useEffect(() => {
     return () => {
       if (statsIntervalRef.current) {
         clearInterval(statsIntervalRef.current);
         statsIntervalRef.current = null;
       }
+      if (iceRestartTimeoutRef.current) {
+        clearTimeout(iceRestartTimeoutRef.current);
+        iceRestartTimeoutRef.current = null;
+      }
+      if (channelReconnectTimerRef.current) {
+        clearTimeout(channelReconnectTimerRef.current);
+        channelReconnectTimerRef.current = null;
+      }
     };
   }, []);
 
-  // Toggle audio
-  // FIX 1: Use RTCRtpSender instead of MediaStream track
-  // FIX (PERSISTENT MUTE): Also persist state in ref for reconnects
+  // Toggle audio — updates both the RTP sender (remote side) and local stream track (preview)
   const toggleAudio = useCallback((enabled: boolean) => {
     isAudioEnabledRef.current = enabled;
 
+    // Update sender so remote peer hears the change
     const pc = peerConnectionRef.current;
-    if (!pc) return;
+    if (pc) {
+      pc.getSenders()
+        .filter(sender => sender.track?.kind === 'audio')
+        .forEach(sender => {
+          if (sender.track) sender.track.enabled = enabled;
+        });
+    }
 
-    pc.getSenders()
-      .filter(sender => sender.track?.kind === 'audio')
-      .forEach(sender => {
-        if (sender.track) {
-          sender.track.enabled = enabled;
-          console.log('[WebRTC] Audio sender muted:', !enabled);
-        }
-      });
+    // Also update local stream tracks so the local preview reflects mute state
+    localStreamRef.current?.getAudioTracks().forEach(t => { t.enabled = enabled; });
+    console.log('[WebRTC] Audio', enabled ? 'unmuted' : 'muted');
   }, []);
 
-  // Toggle video
-  // FIX 2: Use RTCRtpSender instead of MediaStream track
-  // FIX (PERSISTENT MUTE): Also persist state in ref for reconnects
+  // Toggle video — updates both the RTP sender (remote side) and local stream track (preview)
   const toggleVideo = useCallback((enabled: boolean) => {
     isVideoEnabledRef.current = enabled;
 
+    // Update sender so remote peer sees the change
     const pc = peerConnectionRef.current;
-    if (!pc) return;
+    if (pc) {
+      pc.getSenders()
+        .filter(sender => sender.track?.kind === 'video')
+        .forEach(sender => {
+          if (sender.track) sender.track.enabled = enabled;
+        });
+    }
 
-    pc.getSenders()
-      .filter(sender => sender.track?.kind === 'video')
-      .forEach(sender => {
-        if (sender.track) {
-          sender.track.enabled = enabled;
-          console.log('[WebRTC] Video sender disabled:', !enabled);
-        }
-      });
+    // Also update local stream tracks so the local preview reflects camera state
+    localStreamRef.current?.getVideoTracks().forEach(t => { t.enabled = enabled; });
+    console.log('[WebRTC] Video', enabled ? 'enabled' : 'disabled');
   }, []);
 
   // Switch camera (mobile)
@@ -869,19 +919,24 @@ export const useWebRTCCall = (
 
     try {
       const newFacingMode = currentFacingModeRef.current === 'user' ? 'environment' : 'user';
-      currentFacingModeRef.current = newFacingMode;
 
-      // Stop current video track
-      localStreamRef.current.getVideoTracks().forEach((track) => track.stop());
-
-      // Get new stream with different camera
+      // Get new stream FIRST — if this fails, the old camera is still alive.
+      // Stopping the old track before acquiring the new one risks a permanently dead camera on iOS Safari.
       const newStream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: newFacingMode },
         audio: false,
       });
 
       const newVideoTrack = newStream.getVideoTracks()[0];
-      
+
+      // Stop any other tracks from the temporary stream — only the video track is needed
+      newStream.getTracks().forEach(t => { if (t !== newVideoTrack) t.stop(); });
+
+      // Now safe to stop the old video track
+      localStreamRef.current.getVideoTracks().forEach((track) => track.stop());
+
+      currentFacingModeRef.current = newFacingMode;
+
       // Replace track in peer connection
       const pc = peerConnectionRef.current;
       if (pc) {
@@ -911,6 +966,30 @@ export const useWebRTCCall = (
       console.error('[WebRTC] Error switching camera:', error);
       toast.error('Could not switch camera');
     }
+  }, []);
+
+  // iOS Safari audio interruption recovery (issue 7)
+  // Phone calls, AirPods reconnect, and app switches can suspend the audio context.
+  // Re-trigger remote stream state on visibility restore so VideoChat replays the video element.
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && peerConnectionRef.current?.connectionState === 'connected') {
+        console.log('[WebRTC] Page visible — re-triggering remote stream for iOS audio recovery');
+        setState((prev) => ({ ...prev, remoteStream: remoteStreamRef.current }));
+      }
+    };
+    const handlePageShow = (e: PageTransitionEvent) => {
+      if (e.persisted && peerConnectionRef.current?.connectionState === 'connected') {
+        console.log('[WebRTC] pageshow (BFCache restore) — re-triggering remote stream');
+        setState((prev) => ({ ...prev, remoteStream: remoteStreamRef.current }));
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pageshow', handlePageShow);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pageshow', handlePageShow);
+    };
   }, []);
 
   // Dismiss incoming call
@@ -970,7 +1049,6 @@ export const useWebRTCCall = (
           if (shouldYield) {
             console.log('[WebRTC] Glare detected, patient yielding (rolling back)');
             await peerConnection.setLocalDescription({ type: 'rollback' });
-            isInitiatorRef.current = false;
           } else {
             console.log('[WebRTC] Glare detected, doctor takes priority (ignoring remote offer)');
             return;
@@ -1000,7 +1078,24 @@ export const useWebRTCCall = (
         }
         pendingIceCandidatesRef.current = [];
 
-        // STOP HERE. Do NOT getUserMedia, addTrack, createAnswer, or setLocalDescription.
+        // ICE restart offers come from the remote peer during reconnect.
+        // They must NOT trigger the incoming-call UI — the call is already active.
+        if (offerPayload.iceRestart) {
+          console.log('[WebRTC] ICE restart offer — skipping incoming-call UI, creating answer immediately');
+          // For ICE restart we answer immediately (no user interaction needed)
+          const answer = await peerConnection.createAnswer();
+          await peerConnection.setLocalDescription(answer);
+          if (signalChannelRef.current) {
+            signalChannelRef.current.send({
+              type: 'broadcast',
+              event: 'answer',
+              payload: { sdp: peerConnection.localDescription!.sdp, type: 'answer', senderId: userId },
+            });
+          }
+          return;
+        }
+
+        // STOP HERE for normal offers. Do NOT getUserMedia, addTrack, createAnswer, or setLocalDescription.
         // All of that happens in answerCall() when the user clicks Answer.
         // Doing any of it here causes duplicate SDP negotiation → black screen.
         setState((prev) => ({
@@ -1122,31 +1217,50 @@ export const useWebRTCCall = (
           resolveChannelReadyRef.current?.();
         } else if (status === 'CLOSED') {
           console.warn('[WebRTC] Signaling channel closed');
-          // FIX: DO NOT end call on signaling close
-          // WebRTC can survive signaling loss once connected
+          // WebRTC can survive signaling loss once connected — do NOT end the call.
           signalChannelRef.current = null;
           setState((prev) => ({
             ...prev,
-            // Only reset to idle if not already in an active call
             connectionStatus: prev.isCallActive ? prev.connectionStatus : 'idle',
           }));
+
+          // Attempt to re-establish the signaling channel after a short delay.
+          // This handles transient network drops without killing an active call.
+          if (channelReconnectTimerRef.current) clearTimeout(channelReconnectTimerRef.current);
+          channelReconnectTimerRef.current = setTimeout(() => {
+            channelReconnectTimerRef.current = null;
+            if (!signalChannelRef.current) {
+              console.log('[WebRTC] Reconnecting signaling channel...');
+              // Remove the stale channel and set up a fresh one
+              supabase.removeChannel(channel);
+              activeChannelRef.current = setupChannel();
+            }
+          }, 2000);
         }
       });
 
       return channel;
     };
 
-    // FIX #1 (RECONNECTION): Call setupChannel to initialize with all handlers
-    let channel = setupChannel();
+    // Call setupChannel to initialize with all handlers
+    activeChannelRef.current = setupChannel();
 
     return () => {
       console.log('[WebRTC] Cleaning up channel (unmount only)');
       
+      if (channelReconnectTimerRef.current) {
+        clearTimeout(channelReconnectTimerRef.current);
+        channelReconnectTimerRef.current = null;
+      }
+
       // Only remove channel on actual component unmount
       if (signalChannelRef.current) {
         supabase.removeChannel(signalChannelRef.current);
         signalChannelRef.current = null;
+      } else if (activeChannelRef.current) {
+        supabase.removeChannel(activeChannelRef.current);
       }
+      activeChannelRef.current = null;
       
       // Reset flag for next mount
       channelInitializedRef.current = false;

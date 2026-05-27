@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -43,6 +43,11 @@ export const VideoChatDialog = ({
   consultationType,
 }: VideoChatDialogProps) => {
   const [confirmEndCall, setConfirmEndCall] = useState(false);
+  // Track whether the user manually dismissed an incoming call so we don't re-open.
+  const [incomingDismissed, setIncomingDismissed] = useState(false);
+  // Ref for the auto-dismiss timeout so it can be cleared on answer/decline.
+  const incomingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const currentUserId = userRole === 'doctor' ? doctorId : patientId;
   const remoteUserId = userRole === 'doctor' ? patientId : doctorId;
 
@@ -55,14 +60,35 @@ export const VideoChatDialog = ({
     remoteUserId
   );
 
-  // Auto-open the dialog when an incoming call arrives (isAnswering set by handleOffer)
-  // This handles the case where the doctor hasn't clicked "Call" yet but the patient called.
+  // Auto-open the dialog when an incoming call arrives.
+  // Guard: don't reopen if the user already dismissed this incoming call.
   useEffect(() => {
-    if (!isOpen && callState.isAnswering && onOpen) {
+    if (!isOpen && callState.isAnswering && onOpen && !incomingDismissed) {
       console.log('[VideoChatDialog] Incoming call detected — auto-opening dialog');
       onOpen();
+
+      // Auto-dismiss after 60s if not answered — matches hook-level call timeout
+      if (incomingTimeoutRef.current) clearTimeout(incomingTimeoutRef.current);
+      incomingTimeoutRef.current = setTimeout(() => {
+        if (!callState.isCallActive) {
+          console.log('[VideoChatDialog] Incoming call auto-dismissed after timeout');
+          callActions.dismissIncomingCall();
+          setIncomingDismissed(true);
+        }
+      }, 60000);
     }
-  }, [callState.isAnswering, isOpen, onOpen]);
+  }, [callState.isAnswering, isOpen, onOpen, incomingDismissed]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Reset dismissed flag when a new call arrives (isAnswering goes false → true)
+  useEffect(() => {
+    if (!callState.isAnswering) {
+      setIncomingDismissed(false);
+      if (incomingTimeoutRef.current) {
+        clearTimeout(incomingTimeoutRef.current);
+        incomingTimeoutRef.current = null;
+      }
+    }
+  }, [callState.isAnswering]);
 
   // Only show video chat if consultation is online
   useEffect(() => {
@@ -72,23 +98,18 @@ export const VideoChatDialog = ({
     }
   }, [isOpen, consultationType, onClose]);
 
-  // Re-attach remote stream to video element when dialog opens.
-  // Race condition: stream may arrive before the dialog (and its <video> ref) is mounted.
-  // When isOpen becomes true, VideoChat mounts and its refs become valid — re-trigger attachment.
-  useEffect(() => {
-    if (isOpen && callState.remoteStream) {
-      // Small delay to let the DOM settle after dialog open animation
-      const t = setTimeout(() => {
-        callActions.setRemoteStream(callState.remoteStream);
-      }, 100);
-      return () => clearTimeout(t);
-    }
-  }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
-
+  // handleClose: only block close for active/outgoing calls.
+  // Incoming-call state (isAnswering) is dismissible — user should never be trapped.
   const handleClose = () => {
-    if (callState.isCallActive || callState.isCalling || callState.isAnswering) {
-      setConfirmEndCall(true);
+    if (callState.isCallActive || callState.isCalling) {
+      // Guard against duplicate triggers (ESC + backdrop click race)
+      if (!confirmEndCall) setConfirmEndCall(true);
     } else {
+      // Dismiss any pending incoming call and mark it so auto-open doesn't refire
+      if (callState.isAnswering) {
+        callActions.dismissIncomingCall();
+        setIncomingDismissed(true);
+      }
       onClose();
     }
   };
@@ -100,8 +121,12 @@ export const VideoChatDialog = ({
   return (
     <>
       <Dialog open={isOpen} onOpenChange={(open) => { if (!open) handleClose(); }}>
-        {/* Dialog fills most of the viewport; inner content is a flex column */}
-        <DialogContent className="max-w-2xl w-[95vw] h-[92vh] max-h-[92vh] flex flex-col p-0 gap-0 overflow-hidden">
+        {/*
+          h-[92dvh]: dynamic viewport units fix iOS Safari toolbar resize issue.
+          dvh accounts for the browser chrome shrinking/growing on scroll,
+          preventing cropped controls and black bottom areas on mobile.
+        */}
+        <DialogContent className="max-w-2xl w-[95vw] h-[92dvh] max-h-[92dvh] flex flex-col p-0 gap-0 overflow-hidden">
           {/* Header — fixed, never scrolls */}
           <DialogHeader className="flex-shrink-0 px-4 pt-4 pb-2 sm:px-5 sm:pt-5 border-b border-border/40">
             <DialogTitle className="flex items-center justify-between pr-6 text-base sm:text-lg">
@@ -109,6 +134,11 @@ export const VideoChatDialog = ({
               {callState.isCallActive && (
                 <span className="flex-shrink-0 text-xs px-2 py-0.5 bg-green-500/20 text-green-500 rounded-full animate-pulse ml-2">
                   Live
+                </span>
+              )}
+              {callState.connectionStatus === 'reconnecting' && (
+                <span className="flex-shrink-0 text-xs px-2 py-0.5 bg-orange-500/20 text-orange-500 rounded-full animate-pulse ml-2">
+                  Reconnecting…
                 </span>
               )}
             </DialogTitle>
@@ -123,8 +153,22 @@ export const VideoChatDialog = ({
               isCalling={callState.isCalling}
               isAnswering={callState.isAnswering}
               onStartCall={callActions.startCall}
-              onAnswerCall={callActions.answerCall}
-              onEndCall={callActions.endCall}
+              onAnswerCall={(videoEnabled) => {
+                // Clear auto-dismiss timer — user answered manually
+                if (incomingTimeoutRef.current) {
+                  clearTimeout(incomingTimeoutRef.current);
+                  incomingTimeoutRef.current = null;
+                }
+                return callActions.answerCall(videoEnabled);
+              }}
+              onEndCall={() => {
+                // Clear auto-dismiss timer on decline too
+                if (incomingTimeoutRef.current) {
+                  clearTimeout(incomingTimeoutRef.current);
+                  incomingTimeoutRef.current = null;
+                }
+                callActions.endCall();
+              }}
               onToggleAudio={callActions.toggleAudio}
               onToggleVideo={callActions.toggleVideo}
               onSwitchCamera={callActions.switchCamera}
